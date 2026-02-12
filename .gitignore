@@ -1,0 +1,55 @@
+# En .gitignore agrega:
+
+# Ignorar todas las imágenes
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
+*.svg
+*.webp
+
+# O ignorar solo carpetas específicas
+images/
+uploads/
+assets/images/
+# Logs (archivos temporales)
+logs/
+*.log
+
+# Bases de datos (backups y dumps)
+MySQL/
+*.sql
+*.db
+*.sqlite
+
+# Cache
+cache/
+tmp/
+temp/
+# WordPress core
+wp-admin/
+wp-includes/
+
+# Config
+wp-config.php
+
+# Uploads
+wp-content/uploads/
+
+# Plugins (excepto propios)
+wp-content/plugins/
+
+# Mantener solo tus plugins personalizados
+!wp-content/plugins/mi-plugin-personalizado/
+
+# Themes (excepto el activo si quieres)
+wp-content/themes/
+
+# Mantener solo tu tema personalizado
+!wp-content/themes/mi-tema-personalizado/
+
+# Otros
+*.log
+*.zip
+node_modules/

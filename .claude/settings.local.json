@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls -la \"C:\\\\inetpub\\\\wwwroot\\\\wordpress\\\\wp-content\\\\themes\\\\Newspaper\"\" | grep -E \"home.php)",
+      "Bash(front-page.php \")",
+      "Bash(mysql:*)",
+      "Bash(where mysql:*)",
+      "Bash(\"/c/Program Files/MySQL/MySQL Server 8.0/bin/mysql.exe\" -u root -pyue02 -h 127.0.0.1 -P 3306 sudcalifornios -e \"DESCRIBE jos_zoo_item;\")",
+      "Bash(\"/c/Program Files/MySQL/MySQL Server 8.0/bin/mysql.exe\" -u root -pyue02 -h 127.0.0.1 -P 3306 sudcalifornios -e \"SELECT id, name, created_by, created_by_alias FROM jos_zoo_item ORDER BY id DESC LIMIT 20;\")",
+      "Bash(\"/c/Program Files/MySQL/MySQL Server 8.0/bin/mysql.exe\":*)",
+      "Bash(\"/c/Program Files/MySQL/MySQL Server 8.0/bin/mysql.exe\" -u root -pyue02 -h 127.0.0.1 -P 3306 sudcalifornios -e \"SELECT id, name, username FROM jos_users;\")",
+      "Bash(php fix-authors.php:*)"
+    ]
+  }
+}
