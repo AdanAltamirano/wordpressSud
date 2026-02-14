@@ -10,7 +10,7 @@ if ( ! is_user_logged_in() || ! current_user_can( 'manage_options' ) ) {
     wp_die( 'Access Denied. You must be an administrator to run this script.' );
 }
 
-echo "<h1>Theme & Sidebar Inspector v3</h1>";
+echo "<h1>Theme & Sidebar Inspector v1.1</h1>";
 
 // 1. Determine active theme
 $theme = wp_get_theme();

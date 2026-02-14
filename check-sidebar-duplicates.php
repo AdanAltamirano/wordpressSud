@@ -12,7 +12,7 @@ if ( ! is_user_logged_in() || ! current_user_can( 'manage_options' ) ) {
 
 $sidebars_widgets = get_option('sidebars_widgets');
 
-echo "<h1>Sidebar Widget Check</h1>";
+echo "<h1>Sidebar Widget Check v1.1</h1>";
 
 if (!$sidebars_widgets) {
     echo "Could not retrieve sidebars_widgets option.";

@@ -53,7 +53,7 @@ function get_content_signature($id_base, $settings) {
 $sidebars_widgets = get_option('sidebars_widgets');
 $action = isset($_GET['action']) ? $_GET['action'] : 'scan';
 
-echo "<h1>Duplicate Content Detector</h1>";
+echo "<h1>Duplicate Content Detector v1.1</h1>";
 echo "<p><a href='fix-sidebar-content-duplicates.php'>Re-scan</a></p>";
 
 $duplicates_found = array();
