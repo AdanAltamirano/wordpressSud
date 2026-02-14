@@ -6,29 +6,28 @@ Para solucionar este problema, he creado tres scripts que puedes ejecutar en tu 
 
 ## Pasos para solucionar el problema:
 
-1.  **Paso 1: Verificar duplicados en la base de datos**
+1.  **Paso 1: Verificar duplicados EXACTOS en la base de datos**
     *   Asegúrate de que el archivo `check-sidebar-duplicates.php` esté en la carpeta raíz de tu instalación de WordPress.
     *   Abre tu navegador y visita: `http://tudominio.com/check-sidebar-duplicates.php` (reemplaza `tudominio.com` con tu dominio real).
-    *   Este script te mostrará qué widgets están duplicados en cada barra lateral.
-    *   **Si dice "No duplicates found"**, pasa al Paso 3.
+    *   Este script te mostrará qué widgets tienen el MISMO ID duplicado.
+    *   **Si dice "No duplicates found"**, pasa al Paso 2.
 
-2.  **Paso 2: Corregir duplicados en la base de datos (si el paso 1 encontró problemas)**
-    *   Si el script anterior confirma que hay duplicados, asegúrate de que el archivo `fix-sidebar-duplicates.php` esté en la carpeta raíz.
-    *   Abre tu navegador y visita: `http://tudominio.com/fix-sidebar-duplicates.php`.
-    *   Este script limpiará automáticamente las entradas duplicadas en la configuración de las barras laterales.
-    *   Verás un mensaje de "SUCCESS" si se realizaron cambios.
+2.  **Paso 2: Verificar duplicados de CONTENIDO**
+    *   A veces los widgets tienen IDs diferentes pero el mismo contenido (por ejemplo, dos widgets de texto idénticos).
+    *   Sube el archivo `fix-sidebar-content-duplicates.php` a la raíz.
+    *   Visita: `http://tudominio.com/fix-sidebar-content-duplicates.php`.
+    *   Este script analizará el contenido de cada widget. Si encuentra dos widgets que muestran lo mismo (aunque tengan títulos diferentes), te avisará.
+    *   **Si encuentra duplicados:** Verás un botón rojo **"FIX DUPLICATES NOW"**. Haz clic para eliminar automáticamente las copias sobrantes.
 
-    **Importante:** Debes haber iniciado sesión como **Administrador** en WordPress para que estos scripts funcionen. Si no estás logueado, verás un mensaje de "Access Denied".
-
-3.  **Paso 3: Investigar la estructura del tema (si el problema persiste en la página de inicio)**
-    *   Si los widgets siguen duplicados SOLO en la página de inicio y el Paso 1 no encontró nada, es probable que la página de inicio esté configurada para mostrar DOS barras laterales (una por el tema y otra por el constructor de páginas).
+3.  **Paso 3: Investigar la estructura del tema (si el problema persiste)**
+    *   Si los pasos anteriores no solucionaron el problema, es probable que la página de inicio esté configurada para mostrar DOS barras laterales (una por el tema y otra por el constructor de páginas).
     *   Sube el archivo `inspect-theme-structure.php` a la raíz.
     *   Visita: `http://tudominio.com/inspect-theme-structure.php`.
     *   Este script analizará tu tema activo, la plantilla de la página de inicio, y buscará llamadas duplicadas a la barra lateral en `header.php`, `footer.php` y otros archivos clave.
     *   **Solución común:** Si usas un constructor de páginas (como TagDiv Composer o Visual Composer), revisa la configuración de la página de inicio. Asegúrate de que la plantilla de la página esté en "Default Template" (sin barra lateral) si ya agregaste una barra lateral manualmente en el constructor, O viceversa.
 
 4.  **Eliminar los scripts:**
-    *   Una vez solucionado el problema, te recomiendo eliminar estos tres archivos (`check-sidebar-duplicates.php`, `fix-sidebar-duplicates.php` y `inspect-theme-structure.php`) de tu servidor por seguridad.
+    *   Una vez solucionado el problema, te recomiendo eliminar estos cuatro archivos (`check-sidebar-duplicates.php`, `fix-sidebar-duplicates.php`, `fix-sidebar-content-duplicates.php` y `inspect-theme-structure.php`) de tu servidor por seguridad.
 
 ## Nota Técnica
 
