@@ -12,7 +12,7 @@ Para solucionar este problema, he creado tres scripts que puedes ejecutar en tu 
     *   Este script te mostrará qué widgets tienen el MISMO ID duplicado.
     *   **Si dice "No duplicates found"**, pasa al Paso 2.
 
-2.  **Paso 2: Verificar duplicados de CONTENIDO**
+2.  **Paso 2: Verificar duplicados de CONTENIDO (MUY IMPORTANTE)**
     *   A veces los widgets tienen IDs diferentes pero el mismo contenido (por ejemplo, dos widgets de texto idénticos).
     *   Sube el archivo `fix-sidebar-content-duplicates.php` a la raíz.
     *   Visita: `http://tudominio.com/fix-sidebar-content-duplicates.php`.
@@ -23,7 +23,8 @@ Para solucionar este problema, he creado tres scripts que puedes ejecutar en tu 
     *   Si los pasos anteriores no solucionaron el problema, es probable que la página de inicio esté configurada para mostrar DOS barras laterales (una por el tema y otra por el constructor de páginas).
     *   Sube el archivo `inspect-theme-structure.php` a la raíz.
     *   Visita: `http://tudominio.com/inspect-theme-structure.php`.
-    *   Este script analizará tu tema activo, la plantilla de la página de inicio, y buscará llamadas duplicadas a la barra lateral en `header.php`, `footer.php` y otros archivos clave.
+    *   Este script escaneará **todos los archivos del tema** en busca de llamadas a la barra lateral (`get_sidebar` o `dynamic_sidebar`).
+    *   Busca archivos como `header.php`, `footer.php` o `loop.php` que puedan estar llamando a la barra lateral además de tu plantilla principal.
     *   **Solución común:** Si usas un constructor de páginas (como TagDiv Composer o Visual Composer), revisa la configuración de la página de inicio. Asegúrate de que la plantilla de la página esté en "Default Template" (sin barra lateral) si ya agregaste una barra lateral manualmente en el constructor, O viceversa.
 
 4.  **Eliminar los scripts:**

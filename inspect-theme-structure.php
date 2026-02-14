@@ -10,7 +10,7 @@ if ( ! is_user_logged_in() || ! current_user_can( 'manage_options' ) ) {
     wp_die( 'Access Denied. You must be an administrator to run this script.' );
 }
 
-echo "<h1>Theme & Sidebar Inspector v2</h1>";
+echo "<h1>Theme & Sidebar Inspector v3</h1>";
 
 // 1. Determine active theme
 $theme = wp_get_theme();
@@ -23,17 +23,15 @@ echo "Template Directory: $template_dir<br>";
 // Helper to inspect a file
 function inspect_file($filepath, $name) {
     if ( ! file_exists( $filepath ) ) {
-        echo "<h3 style='color:red'>File Not Found: $name</h3>";
-        return;
+        return; // Silent skip if not found
     }
 
     $content = file_get_contents( $filepath );
-    echo "<h3>Analysis of: $name</h3>";
-    echo "Path: $filepath<br>";
-
     $found = false;
+
     // Check for get_sidebar
     if ( preg_match_all( '/get_sidebar\s*\(\s*(.*?)\s*\)/', $content, $matches ) ) {
+        echo "<h3>Sidebar call in: $name</h3>";
         echo "<p style='color:red'>Found `get_sidebar()` calls:</p><ul>";
         foreach ( $matches[0] as $match ) {
             echo "<li><code>" . htmlspecialchars($match) . "</code></li>";
@@ -44,6 +42,7 @@ function inspect_file($filepath, $name) {
 
     // Check for dynamic_sidebar
     if ( preg_match_all( '/dynamic_sidebar\s*\(\s*(.*?)\s*\)/', $content, $matches ) ) {
+        if (!$found) echo "<h3>Sidebar call in: $name</h3>";
         echo "<p style='color:red'>Found `dynamic_sidebar()` calls:</p><ul>";
         foreach ( $matches[0] as $match ) {
             echo "<li><code>" . htmlspecialchars($match) . "</code></li>";
@@ -52,13 +51,11 @@ function inspect_file($filepath, $name) {
         $found = true;
     }
 
-    if (!$found) {
-        echo "<p>No explicit sidebar calls found.</p>";
+    if ($found) {
+        echo "<details><summary>View Code ($name)</summary>";
+        echo "<textarea style='width:100%;height:300px;'>" . htmlspecialchars($content) . "</textarea>";
+        echo "</details><hr>";
     }
-
-    echo "<details><summary>View Code ($name)</summary>";
-    echo "<textarea style='width:100%;height:300px;'>" . htmlspecialchars($content) . "</textarea>";
-    echo "</details><hr>";
 }
 
 // 2. Identify and inspect key files
@@ -77,35 +74,20 @@ if ( 'page' == get_option('show_on_front') ) {
 echo "<h2>Main Template: $template</h2>";
 inspect_file( $template_dir . '/' . $template, $template );
 
-// Inspect specific parts
-inspect_file( $template_dir . '/header.php', 'header.php' );
-inspect_file( $template_dir . '/footer.php', 'footer.php' );
-inspect_file( $template_dir . '/sidebar.php', 'sidebar.php' );
-inspect_file( $template_dir . '/loop.php', 'loop.php' );
+// 3. Scan ALL PHP files in theme recursively
+echo "<h2>Scanning entire theme directory...</h2>";
+$iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($template_dir));
+foreach ($iterator as $file) {
+    if ($file->isDir()) continue;
+    if ($file->getExtension() !== 'php') continue;
 
-// Inspect functions.php snippet
-$funcs = $template_dir . '/functions.php';
-if ( file_exists( $funcs ) ) {
-    echo "<h3>Check functions.php (first 200 lines)</h3>";
-    $lines = file($funcs);
-    $snippet = implode("", array_slice($lines, 0, 200));
-    if ( preg_match_all( '/register_sidebar\s*\(/', $snippet, $matches ) ) {
-        echo "<p>Found `register_sidebar` calls in start of functions.php.</p>";
-    }
-    echo "<details><summary>View Code (functions.php snippet)</summary>";
-    echo "<textarea style='width:100%;height:300px;'>" . htmlspecialchars($snippet) . "</textarea>";
-    echo "</details><hr>";
-}
+    $path = $file->getPathname();
+    $name = str_replace($template_dir . '/', '', $path);
 
-// 3. List all PHP files in theme root
-echo "<h2>All PHP Files in Theme Root</h2>";
-$files = glob( $template_dir . '/*.php' );
-if ($files) {
-    echo "<ul>";
-    foreach ($files as $f) {
-        echo "<li>" . basename($f) . "</li>";
-    }
-    echo "</ul>";
+    // Skip already checked main template
+    if ($name == $template) continue;
+
+    inspect_file($path, $name);
 }
 
 // 4. Check active plugins that might affect sidebars
