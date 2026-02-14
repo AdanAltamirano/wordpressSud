@@ -24,7 +24,7 @@ Para solucionar este problema, he creado tres scripts que puedes ejecutar en tu 
     *   Si los widgets siguen duplicados SOLO en la página de inicio y el Paso 1 no encontró nada, es probable que la página de inicio esté configurada para mostrar DOS barras laterales (una por el tema y otra por el constructor de páginas).
     *   Sube el archivo `inspect-theme-structure.php` a la raíz.
     *   Visita: `http://tudominio.com/inspect-theme-structure.php`.
-    *   Este script analizará qué plantilla usa tu página de inicio y si hay llamadas duplicadas a `get_sidebar()`.
+    *   Este script analizará tu tema activo, la plantilla de la página de inicio, y buscará llamadas duplicadas a la barra lateral en `header.php`, `footer.php` y otros archivos clave.
     *   **Solución común:** Si usas un constructor de páginas (como TagDiv Composer o Visual Composer), revisa la configuración de la página de inicio. Asegúrate de que la plantilla de la página esté en "Default Template" (sin barra lateral) si ya agregaste una barra lateral manualmente en el constructor, O viceversa.
 
 4.  **Eliminar los scripts:**

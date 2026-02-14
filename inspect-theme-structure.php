@@ -1,6 +1,6 @@
 <?php
 /**
- * Script to inspect the theme template for the home page.
+ * Script to inspect the theme template and related files for sidebars.
  * Upload this to your WordPress root directory and access it via browser.
  */
 
@@ -10,50 +10,28 @@ if ( ! is_user_logged_in() || ! current_user_can( 'manage_options' ) ) {
     wp_die( 'Access Denied. You must be an administrator to run this script.' );
 }
 
-echo "<h1>Home Page Template Inspector</h1>";
+echo "<h1>Theme & Sidebar Inspector v2</h1>";
 
 // 1. Determine active theme
 $theme = wp_get_theme();
-echo "<h2>Active Theme: " . $theme->get('Name') . " (" . $theme->get_template() . ")</h2>";
-echo "Theme Root: " . get_theme_root() . "<br>";
-echo "Template Directory: " . get_template_directory() . "<br>";
+$theme_root = get_theme_root();
+$template_dir = get_template_directory();
 
-// 2. Identify front page template
-$template = '';
+echo "<h2>Active Theme: " . $theme->get('Name') . "</h2>";
+echo "Template Directory: $template_dir<br>";
 
-if ( 'page' == get_option('show_on_front') ) {
-    $front_page_id = get_option('page_on_front');
-    echo "<h3>Home is a Static Page (ID: $front_page_id)</h3>";
-    $template = get_page_template_slug( $front_page_id );
-    if ( ! $template ) {
-        $template = 'page.php'; // Default fallback
-    } else {
-        echo "Assigned Template Slug: $template<br>";
+// Helper to inspect a file
+function inspect_file($filepath, $name) {
+    if ( ! file_exists( $filepath ) ) {
+        echo "<h3 style='color:red'>File Not Found: $name</h3>";
+        return;
     }
-} else {
-    echo "<h3>Home displays Latest Posts</h3>";
-    $template = 'front-page.php';
-    if ( ! file_exists( get_template_directory() . '/' . $template ) ) {
-        $template = 'home.php';
-        if ( ! file_exists( get_template_directory() . '/' . $template ) ) {
-            $template = 'index.php';
-        }
-    }
-}
 
-$template_path = get_template_directory() . '/' . $template;
-if ( ! file_exists( $template_path ) && $theme->get_stylesheet() != $theme->get_template() ) {
-    // Check child theme
-    $template_path = get_stylesheet_directory() . '/' . $template;
-}
+    $content = file_get_contents( $filepath );
+    echo "<h3>Analysis of: $name</h3>";
+    echo "Path: $filepath<br>";
 
-echo "<h3>Using Template File: $template</h3>";
-echo "Path: $template_path<br>";
-
-if ( file_exists( $template_path ) ) {
-    $content = file_get_contents( $template_path );
-    echo "<h4>File Content Analysis:</h4>";
-
+    $found = false;
     // Check for get_sidebar
     if ( preg_match_all( '/get_sidebar\s*\(\s*(.*?)\s*\)/', $content, $matches ) ) {
         echo "<p style='color:red'>Found `get_sidebar()` calls:</p><ul>";
@@ -61,8 +39,7 @@ if ( file_exists( $template_path ) ) {
             echo "<li><code>" . htmlspecialchars($match) . "</code></li>";
         }
         echo "</ul>";
-    } else {
-        echo "<p>No explicit `get_sidebar()` found in this file.</p>";
+        $found = true;
     }
 
     // Check for dynamic_sidebar
@@ -72,27 +49,74 @@ if ( file_exists( $template_path ) ) {
             echo "<li><code>" . htmlspecialchars($match) . "</code></li>";
         }
         echo "</ul>";
-    } else {
-        echo "<p>No explicit `dynamic_sidebar()` found in this file.</p>";
+        $found = true;
     }
 
-    echo "<hr><h4>Full Source Code of $template:</h4>";
-    echo "<textarea style='width:100%;height:400px;'>" . htmlspecialchars($content) . "</textarea>";
-} else {
-    echo "<p style='color:red'>Template file not found at: $template_path</p>";
+    if (!$found) {
+        echo "<p>No explicit sidebar calls found.</p>";
+    }
+
+    echo "<details><summary>View Code ($name)</summary>";
+    echo "<textarea style='width:100%;height:300px;'>" . htmlspecialchars($content) . "</textarea>";
+    echo "</details><hr>";
 }
 
-// 3. Check for Page Builder usage (TagDiv Composer)
+// 2. Identify and inspect key files
+// Index template
+$template = 'index.php';
 if ( 'page' == get_option('show_on_front') ) {
-    $post = get_post( get_option('page_on_front') );
-    if ( $post ) {
-        echo "<hr><h3>Page Content (First 1000 chars):</h3>";
-        echo "<pre>" . htmlspecialchars( substr($post->post_content, 0, 1000) ) . "</pre>";
-
-        if ( strpos( $post->post_content, '[vc_column_text]' ) !== false || strpos( $post->post_content, 'td_block' ) !== false ) {
-            echo "<p style='color:orange'><strong>Note:</strong> This page seems to use a Page Builder (Visual Composer or TagDiv Composer).</p>";
-            echo "<p>If you see a sidebar in the builder AND the page template also has a sidebar, this causes duplication.</p>";
-        }
-    }
+    $fid = get_option('page_on_front');
+    $t = get_page_template_slug($fid);
+    if ($t) $template = $t;
+    else $template = 'page.php';
+} else {
+    if ( file_exists( $template_dir . '/front-page.php' ) ) $template = 'front-page.php';
+    elseif ( file_exists( $template_dir . '/home.php' ) ) $template = 'home.php';
 }
+
+echo "<h2>Main Template: $template</h2>";
+inspect_file( $template_dir . '/' . $template, $template );
+
+// Inspect specific parts
+inspect_file( $template_dir . '/header.php', 'header.php' );
+inspect_file( $template_dir . '/footer.php', 'footer.php' );
+inspect_file( $template_dir . '/sidebar.php', 'sidebar.php' );
+inspect_file( $template_dir . '/loop.php', 'loop.php' );
+
+// Inspect functions.php snippet
+$funcs = $template_dir . '/functions.php';
+if ( file_exists( $funcs ) ) {
+    echo "<h3>Check functions.php (first 200 lines)</h3>";
+    $lines = file($funcs);
+    $snippet = implode("", array_slice($lines, 0, 200));
+    if ( preg_match_all( '/register_sidebar\s*\(/', $snippet, $matches ) ) {
+        echo "<p>Found `register_sidebar` calls in start of functions.php.</p>";
+    }
+    echo "<details><summary>View Code (functions.php snippet)</summary>";
+    echo "<textarea style='width:100%;height:300px;'>" . htmlspecialchars($snippet) . "</textarea>";
+    echo "</details><hr>";
+}
+
+// 3. List all PHP files in theme root
+echo "<h2>All PHP Files in Theme Root</h2>";
+$files = glob( $template_dir . '/*.php' );
+if ($files) {
+    echo "<ul>";
+    foreach ($files as $f) {
+        echo "<li>" . basename($f) . "</li>";
+    }
+    echo "</ul>";
+}
+
+// 4. Check active plugins that might affect sidebars
+echo "<h2>Active Plugins</h2>";
+$plugins = get_option('active_plugins');
+if ($plugins) {
+    echo "<ul>";
+    foreach ($plugins as $p) {
+        echo "<li>$p</li>";
+    }
+    echo "</ul>";
+}
+
 ?>
