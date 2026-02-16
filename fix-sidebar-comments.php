@@ -1,11 +1,14 @@
 <?php
 /**
- * Advanced script to fix missing comments in the sidebar.
- * It searches for the "Comentarios al Sitio" widget to identify the correct sidebar,
- * checks for approved comments, and ensures the "Recent Comments" widget is present.
+ * Advanced script to find and restore missing comments widget in the sidebar.
  *
- * Upload this to your WordPress root directory and run it via browser:
- * http://your-site.com/fix-sidebar-comments.php
+ * This script will:
+ * 1. Check for approved comments (which is a prerequisite for display).
+ * 2. Search the entire database for ANY widget configuration containing "Comentarios al sitio".
+ *    - This helps identify if a specific theme widget (like td_block_social_counter) was used.
+ * 3. Restore the correct widget to the sidebar.
+ *
+ * Upload to WordPress root and run via browser: http://your-site.com/fix-sidebar-comments.php
  */
 
 require_once('wp-load.php');
@@ -14,7 +17,7 @@ if ( ! is_user_logged_in() || ! current_user_can( 'manage_options' ) ) {
     wp_die( 'Access Denied. You must be an administrator to run this script.' );
 }
 
-echo "<h1>Fix Sidebar Comments</h1>";
+echo "<h1>Fix Sidebar Comments (Advanced Search)</h1>";
 
 // 1. Check for Approved Comments
 $approved_comments_count = get_comments(array(
@@ -24,144 +27,153 @@ $approved_comments_count = get_comments(array(
 
 echo "<h2>1. Checking Database for Comments</h2>";
 if ($approved_comments_count == 0) {
-    echo "<p style='color:red; font-size: 1.2em;'><strong>WARNING: No approved comments found in the database (Count: 0).</strong></p>";
-    echo "<p>The 'Recent Comments' widget automatically hides itself when there are no comments to display. This is likely why you don't see anything.</p>";
-    echo "<p><strong>Recommendation:</strong> Create a test comment on any post and approve it, then refresh the page.</p>";
+    echo "<p style='color:red; font-size: 1.2em;'><strong>WARNING: No approved comments found (Count: 0).</strong></p>";
+    echo "<p>The widget will likely be hidden until you have at least one approved comment.</p>";
 } else {
-    echo "<p style='color:green'>Found <strong>$approved_comments_count</strong> approved comments. Proceeding...</p>";
+    echo "<p style='color:green'>Found <strong>$approved_comments_count</strong> approved comments.</p>";
 }
 
-// 2. Identify the Target Sidebar by searching for "Comentarios al Sitio"
-echo "<h2>2. Identifying the Correct Sidebar</h2>";
-$sidebars_widgets = get_option('sidebars_widgets');
-$registered_sidebars = $GLOBALS['wp_registered_sidebars'];
-$target_sidebar_id = '';
-$found_marker = false;
+// 2. Search for the "Comentarios al sitio" widget configuration
+echo "<h2>2. Searching Database for 'Comentarios al sitio' Widget</h2>";
+global $wpdb;
 
-// Helper to get widget instance data
-function get_widget_instance($base_id, $number) {
-    $options = get_option("widget_{$base_id}");
-    if (isset($options[$number])) {
-        return $options[$number];
-    }
-    return false;
-}
+// Search in wp_options for option_name like 'widget_%' and option_value like '%Comentarios al sitio%'
+$results = $wpdb->get_results(
+    "SELECT option_name, option_value FROM $wpdb->options
+     WHERE option_name LIKE 'widget_%'
+     AND option_value LIKE '%Comentarios al sitio%'"
+);
 
-// Scan all sidebars
-foreach ($sidebars_widgets as $sidebar_id => $widgets) {
-    if (!isset($registered_sidebars[$sidebar_id])) continue; // Skip inactive/unregistered
-    if (!is_array($widgets)) continue;
+$found_widget_type = '';
+$found_instance_id = '';
+$found_settings = array();
 
-    foreach ($widgets as $widget_id) {
-        // Parse widget ID (e.g., text-5)
-        if (preg_match('/^([a-z0-9_-]+)-(\d+)$/', $widget_id, $matches)) {
-            $base_id = $matches[1];
-            $number = $matches[2];
-            $instance = get_widget_instance($base_id, $number);
+if ($results) {
+    echo "Found potential matches in database:<br><ul>";
+    foreach ($results as $row) {
+        $option_name = $row->option_name;
+        // Extract widget base ID (e.g., widget_recent-comments -> recent-comments)
+        $base_id = substr($option_name, 7);
 
-            if ($instance) {
-                // Check Title or Text for "Comentarios al Sitio" or "Ver comentarios"
-                $title = isset($instance['title']) ? $instance['title'] : '';
-                $text = isset($instance['text']) ? $instance['text'] : ''; // For text widgets
-
-                if (stripos($title, 'Comentarios al Sitio') !== false || stripos($text, 'Ver comentarios') !== false) {
-                    echo "<p style='color:green'>Found likely target widget: <strong>$widget_id</strong> (Title: '$title') in sidebar: <strong>{$registered_sidebars[$sidebar_id]['name']} ($sidebar_id)</strong></p>";
-                    $target_sidebar_id = $sidebar_id;
-                    $found_marker = true;
-                    break 2; // Found it, break both loops
+        $value = unserialize($row->option_value);
+        if (is_array($value)) {
+            foreach ($value as $key => $instance) {
+                if (is_array($instance) && (
+                    (isset($instance['title']) && stripos($instance['title'], 'Comentarios al sitio') !== false) ||
+                    (isset($instance['custom_title']) && stripos($instance['custom_title'], 'Comentarios al sitio') !== false)
+                )) {
+                    echo "<li><strong>MATCH FOUND:</strong> Widget Type: <code>$base_id</code> | Instance ID: <code>$key</code> | Title: " . (isset($instance['title']) ? $instance['title'] : $instance['custom_title']) . "</li>";
+                    $found_widget_type = $base_id;
+                    $found_instance_id = $key;
+                    $found_settings = $instance;
+                    break 2; // Stop after first good match
                 }
             }
         }
     }
-}
-
-if (!$target_sidebar_id) {
-    echo "<p style='color:orange'>Could not find a widget with 'Comentarios al Sitio'. Falling back to default detection.</p>";
-    // Fallback logic
-    if (isset($sidebars_widgets['td-default-sidebar'])) {
-        $target_sidebar_id = 'td-default-sidebar';
-    } elseif (isset($sidebars_widgets['sidebar-1'])) {
-        $target_sidebar_id = 'sidebar-1';
-    } else {
-        // Just pick the first active one
-        foreach ($sidebars_widgets as $id => $w) {
-            if ($id != 'wp_inactive_widgets' && !empty($w)) {
-                $target_sidebar_id = $id;
-                break;
-            }
-        }
-    }
-}
-
-echo "Target Sidebar for Fix: <strong>$target_sidebar_id</strong><br>";
-
-// 3. Add Recent Comments Widget
-echo "<h2>3. Restoring Recent Comments Widget</h2>";
-
-if (!$target_sidebar_id) {
-    echo "<p style='color:red'>Error: No valid sidebar found to add the widget to.</p>";
+    echo "</ul>";
 } else {
-    // Check if Recent Comments is already there
-    $already_exists = false;
-    $existing_widget_id = '';
+    echo "<p>No existing widget configuration found with title 'Comentarios al sitio'.</p>";
+}
 
-    if (isset($sidebars_widgets[$target_sidebar_id])) {
-        foreach ($sidebars_widgets[$target_sidebar_id] as $widget_id) {
-            if (strpos($widget_id, 'recent-comments') !== false) {
-                $already_exists = true;
-                $existing_widget_id = $widget_id;
-                break;
-            }
+// 3. Restore the widget
+echo "<h2>3. Restoring Widget to Sidebar</h2>";
+
+// Identify target sidebar
+$sidebars_widgets = get_option('sidebars_widgets');
+$target_sidebar_id = '';
+
+// Priority sidebars for Newspaper theme
+$priority_sidebars = array('td-default-sidebar', 'sidebar-1');
+
+foreach ($priority_sidebars as $sid) {
+    if (isset($sidebars_widgets[$sid])) {
+        $target_sidebar_id = $sid;
+        break;
+    }
+}
+if (!$target_sidebar_id) {
+    // Fallback to first active sidebar
+    foreach ($sidebars_widgets as $id => $widgets) {
+        if ($id != 'wp_inactive_widgets' && !empty($widgets)) {
+            $target_sidebar_id = $id;
+            break;
         }
     }
+}
 
-    if ($already_exists) {
-        echo "<p style='color:blue'>Recent Comments widget ($existing_widget_id) is already in $target_sidebar_id.</p>";
+if (!$target_sidebar_id) {
+    echo "<p style='color:red'>Error: No active sidebar found.</p>";
+} else {
+    echo "Target Sidebar: <strong>$target_sidebar_id</strong><br>";
 
-        // Check configuration
-        $parts = explode('-', $existing_widget_id);
-        $number = end($parts);
-        $opts = get_option('widget_recent-comments');
-        if (!isset($opts[$number])) {
-            echo "<p style='color:red'>Widget settings missing. Repairing...</p>";
-            if (!is_array($opts)) $opts = array('_multiwidget' => 1);
-            $opts[$number] = array('title' => 'Comentarios Recientes', 'number' => 5);
-            update_option('widget_recent-comments', $opts);
-            echo "Repaired.";
-        } else {
-            echo "Widget settings are valid (Title: " . $opts[$number]['title'] . ").";
+    // Case A: Found an existing widget configuration in DB
+    if ($found_widget_type && $found_instance_id) {
+        echo "<p>Restoring existing widget: <strong>$found_widget_type-$found_instance_id</strong></p>";
+
+        $widget_id_string = $found_widget_type . '-' . $found_instance_id;
+
+        if (!isset($sidebars_widgets[$target_sidebar_id])) {
+            $sidebars_widgets[$target_sidebar_id] = array();
         }
 
-    } else {
-        echo "<p>Adding new Recent Comments widget to $target_sidebar_id...</p>";
+        if (in_array($widget_id_string, $sidebars_widgets[$target_sidebar_id])) {
+            echo "<p style='color:blue'>Widget is already in the sidebar!</p>";
+        } else {
+            $sidebars_widgets[$target_sidebar_id][] = $widget_id_string;
+            update_option('sidebars_widgets', $sidebars_widgets);
+            echo "<strong style='color:green'>SUCCESS: Restored '$found_widget_type' widget to sidebar.</strong>";
+        }
+    }
+    // Case B: No match, create new one
+    else {
+        echo "<p>No specific configuration found. Creating new widget...</p>";
 
-        $ops = get_option('widget_recent-comments');
+        // 1. Check if 'td_block_recent_comments' (Newspaper Theme) is available
+        $td_available = get_option('widget_td_block_recent_comments');
+        if ($td_available !== false) {
+             echo "<p>Found Newspaper Theme 'Recent Comments' block settings. Using this type.</p>";
+             $widget_base = 'td_block_recent_comments';
+        } else {
+             echo "<p>Newspaper Theme specific block not found. Falling back to standard 'Recent Comments'.</p>";
+             $widget_base = 'recent-comments';
+        }
+
+        $ops = get_option('widget_' . $widget_base);
         if (!is_array($ops)) $ops = array('_multiwidget' => 1);
 
-        // Find next ID
+        // Create new instance
         $next_id = 1;
         foreach (array_keys($ops) as $k) {
             if (is_numeric($k) && $k >= $next_id) $next_id = $k + 1;
         }
 
-        $ops[$next_id] = array('title' => 'Comentarios Recientes', 'number' => 5);
-        update_option('widget_recent-comments', $ops);
+        // Configuration for the new widget
+        if ($widget_base == 'td_block_recent_comments') {
+            $ops[$next_id] = array(
+                'custom_title' => 'Comentarios al sitio',
+                'limit' => 5,
+                'style' => 'style1' // Guessing style
+            );
+        } else {
+            $ops[$next_id] = array(
+                'title' => 'Comentarios al sitio',
+                'number' => 5
+            );
+        }
+
+        update_option('widget_' . $widget_base, $ops);
+
+        $widget_id_string = $widget_base . '-' . $next_id;
 
         if (!isset($sidebars_widgets[$target_sidebar_id])) {
             $sidebars_widgets[$target_sidebar_id] = array();
         }
-        $sidebars_widgets[$target_sidebar_id][] = 'recent-comments-' . $next_id;
+
+        $sidebars_widgets[$target_sidebar_id][] = $widget_id_string;
         update_option('sidebars_widgets', $sidebars_widgets);
 
-        echo "<strong style='color:green'>SUCCESS: Added 'Recent Comments' widget to $target_sidebar_id.</strong>";
+        echo "<strong style='color:green'>SUCCESS: Created new '$widget_base' widget with title 'Comentarios al sitio'.</strong>";
     }
 }
-
-echo "<h2>4. Final Verification</h2>";
-echo "<p>Please verify on the frontend. If you still don't see comments:</p>";
-echo "<ul>";
-echo "<li>Ensure you have <strong>approved comments</strong> (Step 1).</li>";
-echo "<li>Check if the theme has a specific setting to hide comments.</li>";
-echo "<li>If you see the widget title but no comments list, it confirms the 'no comments' issue.</li>";
-echo "</ul>";
 ?>
