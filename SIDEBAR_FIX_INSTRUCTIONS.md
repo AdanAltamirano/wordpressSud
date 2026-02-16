@@ -26,6 +26,19 @@ Para solucionar este problema, he creado dos scripts que puedes ejecutar en tu s
 4.  **Eliminar los scripts:**
     *   Una vez solucionado el problema, te recomiendo eliminar estos dos archivos (`check-sidebar-duplicates.php` y `fix-sidebar-duplicates.php`) de tu servidor por seguridad.
 
+## Solución para widgets de comentarios desaparecidos
+
+Si notas que el widget "Comentarios al sitio" ha desaparecido o está vacío, he creado un script de diagnóstico y reparación.
+
+1.  **Ejecutar el script de reparación:**
+    *   Asegúrate de que el archivo `fix-sidebar-comments.php` esté en la carpeta raíz.
+    *   Visita `http://tudominio.com/fix-sidebar-comments.php`.
+    *   El script comprobará si hay comentarios huérfanos (comentarios vinculados a publicaciones que no existen o no están publicadas).
+    *   Si el widget está mal configurado o falta, el script intentará restaurarlo o recrearlo automáticamente.
+    *   Puedes forzar la recreación del widget haciendo clic en el enlace "Force Recreate Widget" si la primera ejecución no funcionó.
+
+    **Importante:** Este script requiere permisos de administrador.
+
 ## Nota Técnica
 
 El problema ocurre cuando la opción `sidebars_widgets` en la base de datos contiene el mismo ID de widget varias veces en el mismo array de barra lateral. WordPress normalmente evita esto, pero puede ocurrir durante migraciones manuales o scripts de importación que no verifican duplicados antes de agregar widgets.
