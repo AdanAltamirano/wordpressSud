@@ -19,7 +19,7 @@ define('WP_DB_NAME', 'wordpress');
 
 // Local Paths
 // Note: This path is where the Joomla files reside on the local Windows machine.
-define('JOOMLA_LOCAL_PATH', 'C:/Sudcaliforniosjoomla');
+define('JOOMLA_LOCAL_PATH', 'C:/Sudcalifornios');
 
 // Migration Settings
 define('MIGRATION_BATCH_SIZE', 50); // Number of items to process per request
