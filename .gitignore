@@ -53,3 +53,4 @@ wp-content/themes/
 *.log
 *.zip
 node_modules/
+migration-config.php
