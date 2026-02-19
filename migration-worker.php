@@ -226,9 +226,28 @@ if ($step == 'categories') {
             if (file_exists($source_path)) {
                 // Copy to WP
                 $upload_dir = wp_upload_dir();
+
+                // Use MIGRATION_UPLOAD_DIR if defined, inside 'uploads'
+                $rel_path = defined('MIGRATION_UPLOAD_DIR') ? MIGRATION_UPLOAD_DIR : 'imported-content';
+
+                // Preserve folder structure (e.g. images/news/2023/photo.jpg -> uploads/imported-content/news/2023/photo.jpg)
+                // $img_rel_path is something like 'noticias/foto.jpg' (without leading /images/)
+                // But wait, the regex captures 'noticias/foto.jpg' from '/images/noticias/foto.jpg'
+                // Or simply 'folder/file.jpg'
+
+                $dir_structure = dirname($img_rel_path);
+                if ($dir_structure == '.') $dir_structure = '';
+
+                $target_dir = $upload_dir['basedir'] . '/' . $rel_path . '/' . $dir_structure;
+                $target_url = $upload_dir['baseurl'] . '/' . $rel_path . '/' . $dir_structure;
+
+                if (!file_exists($target_dir)) {
+                    mkdir($target_dir, 0755, true);
+                }
+
                 $filename = basename($img_rel_path);
-                $destination_path = $upload_dir['path'] . '/' . $filename;
-                $destination_url = $upload_dir['url'] . '/' . $filename;
+                $destination_path = $target_dir . '/' . $filename;
+                $destination_url = $target_url . '/' . $filename;
 
                 if (!file_exists($destination_path)) {
                     if (copy($source_path, $destination_path)) {
