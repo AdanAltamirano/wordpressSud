@@ -109,6 +109,7 @@ function page_header($title) {
     echo "<a href='?action=sync_posts' class='btn btn-success'>Sync Posts</a>";
     echo "<a href='?action=fix_categories' class='btn btn-success'>Fix Categorías</a>";
     echo "<a href='?action=fix_ids' class='btn btn-warning'>Fix IDs Visibles</a>";
+    echo "<a href='?action=fix_elements' class='btn btn-warning'>Fix Elements</a>";
     echo "<a href='?action=sync_all' class='btn btn-danger'>Sync Completo</a>";
     echo "</div>";
 }
@@ -334,6 +335,7 @@ function do_audit() {
     $wp_published = $wpdb->get_var("SELECT COUNT(*) FROM $wpdb->posts WHERE post_type='post' AND post_status='publish'");
     $wp_tracked = $wpdb->get_var("SELECT COUNT(*) FROM $wpdb->postmeta WHERE meta_key='_joomla_zoo_id'");
     $wp_visible_ids = $wpdb->get_var("SELECT COUNT(*) FROM $wpdb->postmeta WHERE meta_key='joomla_original_id'");
+    $wp_elements = $wpdb->get_var("SELECT COUNT(*) FROM $wpdb->postmeta WHERE meta_key='_joomla_zoo_elements'");
     $wp_cats = $wpdb->get_var("SELECT COUNT(*) FROM $wpdb->term_taxonomy WHERE taxonomy='category'");
     $wp_attachments = $wpdb->get_var("SELECT COUNT(*) FROM $wpdb->posts WHERE post_type='attachment'");
 
@@ -347,6 +349,7 @@ function do_audit() {
     log_msg("Posts publicados: $wp_published", 'info');
     log_msg("Posts con _joomla_zoo_id: $wp_tracked", 'info');
     log_msg("Posts con joomla_original_id (visible): $wp_visible_ids", $wp_visible_ids >= $wp_tracked ? 'success' : 'warn');
+    log_msg("Posts con elements JSON: $wp_elements", $wp_elements >= $wp_tracked ? 'success' : 'warn');
     log_msg("Categorías: $wp_cats", 'info');
     log_msg("Attachments: $wp_attachments", 'info');
 
@@ -431,6 +434,7 @@ function do_audit() {
     if ($missing_count > 0) echo "<li><strong style='color:#50c878;'>Importar $missing_count posts faltantes</strong></li>";
     echo "<li>Reasignar categorías en posts existentes</li>";
     if ($wp_visible_ids < $wp_tracked) echo "<li><strong style='color:#ffd93d;'>Poblar joomla_original_id (visible)</strong></li>";
+    if ($wp_elements < $wp_tracked) echo "<li><strong style='color:#ffd93d;'>Importar Elements JSON</strong> (necesario para imgs)</li>";
     echo "</ol><hr>";
 
     if ($broken_img > 0) echo "<a href='?action=fix_image_urls' class='btn btn-warning'>1. Fix $broken_img URLs Imágenes</a>";
@@ -442,6 +446,7 @@ function do_audit() {
     }
     echo "<a href='?action=fix_categories' class='btn btn-success'>5. Fix Categorías</a>";
     if ($wp_visible_ids < $wp_tracked) echo "<a href='?action=fix_ids' class='btn btn-warning'>Fix IDs Visibles</a>";
+    if ($wp_elements < $wp_tracked) echo "<a href='?action=fix_elements' class='btn btn-warning'>Fix Elements JSON</a>";
     echo "<br><br><a href='?action=sync_all' class='btn btn-danger'>Ejecutar Todo en Secuencia</a>";
     echo "</div>";
 
@@ -751,6 +756,8 @@ function do_sync_posts($offset, $batch, $dry_run) {
 
             // Ensure visible ID reference
             update_post_meta($ex_id, 'joomla_original_id', $j_id);
+            // Save raw elements for image extraction
+            update_post_meta($ex_id, '_joomla_zoo_elements', $row['elements']);
 
             log_msg("Actualizado: {$row['name']} (WP:$ex_id)", 'success');
             $updated++;
@@ -762,6 +769,8 @@ function do_sync_posts($offset, $batch, $dry_run) {
 
             // Add visible ID reference
             update_post_meta($wp_id, 'joomla_original_id', $j_id);
+            // Save raw elements for image extraction
+            update_post_meta($wp_id, '_joomla_zoo_elements', $row['elements']);
 
             log_msg("Creado: {$row['name']} (J:$j_id -> WP:$wp_id)", 'success');
             $created++;
@@ -801,6 +810,86 @@ function do_sync_posts($offset, $batch, $dry_run) {
         $dry_p = $dry_run ? '&dry_run=1' : '';
         $url = "?action=sync_posts&offset=$next&batch=$batch$dry_p";
         echo "<script>setTimeout(function(){ window.location.href='$url'; }, 3000);</script>";
+        echo "<a href='$url' class='btn btn-primary'>Continuar</a> <a href='?action=audit' class='btn btn-secondary'>Detener</a>";
+    } else {
+        echo "<h3 style='color:#50c878;'>Completado</h3><a href='?action=audit' class='btn btn-primary'>Auditoría</a>";
+    }
+    echo "</div>";
+    page_footer();
+}
+
+// ============================================================
+// ACTION: FIX ELEMENTS (Backfill raw elements)
+// ============================================================
+function do_fix_elements($offset, $batch, $dry_run) {
+    global $wpdb;
+    page_header('Fix Elements JSON');
+    echo "<div class='card'><h2>Guardando JSON Elements para Extracción de Imágenes</h2>";
+    if ($dry_run) echo "<div class='dry-banner'>MODO DRY RUN</div>";
+    echo "<div class='log'>";
+
+    $jdb = get_joomla_db();
+
+    $total = $wpdb->get_var("SELECT COUNT(*) FROM $wpdb->postmeta WHERE meta_key='_joomla_zoo_id'");
+
+    $posts = $wpdb->get_results($wpdb->prepare(
+        "SELECT pm.post_id, pm.meta_value as zoo_id, p.post_title
+         FROM $wpdb->postmeta pm
+         JOIN $wpdb->posts p ON pm.post_id=p.ID
+         WHERE pm.meta_key='_joomla_zoo_id' AND p.post_type='post'
+         ORDER BY pm.post_id ASC LIMIT %d, %d",
+        $offset, $batch
+    ));
+
+    $fixed = 0;
+    $ok = 0;
+    $errors = 0;
+
+    foreach ($posts as $post) {
+        $zoo_id = intval($post->zoo_id);
+        $wp_id = $post->post_id;
+
+        $has_elements = get_post_meta($wp_id, '_joomla_zoo_elements', true);
+
+        if (empty($has_elements)) {
+            $j_item = $jdb->query("SELECT elements FROM jos_zoo_item WHERE id = $zoo_id");
+            if ($j_item && $j_item->num_rows > 0) {
+                $row = $j_item->fetch_assoc();
+                $elements = $row['elements'];
+
+                if (!$dry_run) {
+                    update_post_meta($wp_id, '_joomla_zoo_elements', $elements);
+                    log_msg("Guardado elements para: {$post->post_title}", 'success');
+                } else {
+                    log_msg("GUARDARÍA elements para: {$post->post_title}", 'info');
+                }
+                $fixed++;
+            } else {
+                log_msg("No encontrado en Joomla ID $zoo_id: {$post->post_title}", 'error');
+                $errors++;
+            }
+        } else {
+            $ok++;
+        }
+    }
+
+    $jdb->close();
+    echo "</div></div>";
+
+    echo "<div class='stat-grid'>";
+    echo "<div class='stat-box ok'><div class='number'>$fixed</div><div class='label'>Actualizados</div></div>";
+    echo "<div class='stat-box'><div class='number'>$ok</div><div class='label'>Ya Tienen Elements</div></div>";
+    echo "<div class='stat-box'><div class='number'>$errors</div><div class='label'>Errores</div></div>";
+    echo "</div>";
+
+    $next = $offset + $batch;
+    $progress = min(100, round(($next / max($total, 1)) * 100));
+
+    echo "<div class='card'><div class='progress-bar'><div class='fill' style='width:{$progress}%'>$progress%</div></div>";
+    if ($next < $total) {
+        $dry_p = $dry_run ? '&dry_run=1' : '';
+        $url = "?action=fix_elements&offset=$next&batch=$batch$dry_p";
+        echo "<script>setTimeout(function(){ window.location.href='$url'; }, 500);</script>";
         echo "<a href='$url' class='btn btn-primary'>Continuar</a> <a href='?action=audit' class='btn btn-secondary'>Detener</a>";
     } else {
         echo "<h3 style='color:#50c878;'>Completado</h3><a href='?action=audit' class='btn btn-primary'>Auditoría</a>";
@@ -972,6 +1061,10 @@ function do_sync_all() {
             break;
         case 'fix_ids':
             do_fix_ids($offset, $batch, false);
+            echo "<script>setTimeout(function(){ window.location.href='?action=sync_all&step=fix_elements&offset=0&batch=$batch'; }, 2000);</script>";
+            break;
+        case 'fix_elements':
+            do_fix_elements($offset, $batch, false);
             echo "<script>setTimeout(function(){ window.location.href='?action=sync_all&step=posts&offset=0&batch=$batch'; }, 2000);</script>";
             break;
         case 'posts':
@@ -991,6 +1084,7 @@ switch ($action) {
     case 'sync_posts':      do_sync_posts($offset, $batch, $dry_run); break;
     case 'fix_categories':  do_fix_categories($offset, $batch, $dry_run); break;
     case 'fix_ids':         do_fix_ids($offset, $batch, $dry_run); break;
+    case 'fix_elements':    do_fix_elements($offset, $batch, $dry_run); break;
     case 'sync_all':        do_sync_all(); break;
     default:                do_audit();
 }
