@@ -220,7 +220,7 @@ function do_audit() {
     page_header('Auditoría Definitiva');
     $j = jdb();
 
-    $j_pub = $j->query("SELECT COUNT(*) c FROM jos_zoo_item WHERE type IN('article','page') AND state=1")->fetch_assoc()['c'];
+    $j_pub = $j->query("SELECT COUNT(*) c FROM jos_zoo_item WHERE type IN('article','page','blog-post') AND state=1")->fetch_assoc()['c'];
     $j_auth = $j->query("SELECT COUNT(*) c FROM jos_zoo_item WHERE type='author'")->fetch_assoc()['c'];
     $j_b64 = $j->query("SELECT COUNT(*) c FROM jos_zoo_item WHERE type='article' AND state=1 AND elements LIKE '%data:image%'")->fetch_assoc()['c'];
 
@@ -242,7 +242,7 @@ function do_audit() {
 
     // Missing posts
     $imported = array_flip($wpdb->get_col("SELECT meta_value FROM $wpdb->postmeta WHERE meta_key='_joomla_zoo_id'"));
-    $r = $j->query("SELECT id FROM jos_zoo_item WHERE type IN('article','page') AND state=1");
+    $r = $j->query("SELECT id FROM jos_zoo_item WHERE type IN('article','page','blog-post') AND state=1");
     $missing = 0;
     while ($row = $r->fetch_assoc()) { if (!isset($imported[$row['id']])) $missing++; }
 
@@ -282,6 +282,10 @@ function do_audit() {
 
     echo "<span class='step $s5'>5</span><strong>Importar faltantes</strong> — $missing posts no importados ";
     if ($missing > 0) echo "<a href='?action=import_missing' class='btn btn-green'>Ejecutar</a>";
+    echo "<br>";
+
+    echo "<span class='step active'>6</span><strong>Force Sync Content</strong> — Re-importar contenido de TODOS los posts desde Joomla ";
+    echo "<a href='?action=force_sync' class='btn btn-red' onclick=\"return confirm('¿Seguro? Esto reescribirá el contenido de TODOS los posts importados.')\">Ejecutar</a>";
     echo "<br>";
 
     echo "<br><a href='?action=fix_all' class='btn btn-green' style='background:#1f6feb;font-size:16px;padding:12px 24px'>Ejecutar TODO en secuencia</a>";
@@ -631,7 +635,7 @@ function do_import_missing($offset, $batch) {
     }
 
     // Get missing items
-    $all_joomla = $j->query("SELECT * FROM jos_zoo_item WHERE type IN('article','page') AND state=1 ORDER BY id ASC");
+    $all_joomla = $j->query("SELECT * FROM jos_zoo_item WHERE type IN('article','page','blog-post') AND state=1 ORDER BY id ASC");
     $missing_items = [];
     while ($row = $all_joomla->fetch_assoc()) {
         if (!isset($imported[$row['id']])) $missing_items[] = $row;
@@ -732,6 +736,91 @@ function do_import_missing($offset, $batch) {
 }
 
 // ============================================================
+// PASO 6: FORCE SYNC CONTENT
+// ============================================================
+function do_force_sync($offset, $batch) {
+    global $wpdb;
+    page_header('Paso 6: Force Sync Content');
+    $j = jdb();
+
+    // Get ALL posts that have _joomla_zoo_id
+    $total = $wpdb->get_var("SELECT COUNT(*) FROM $wpdb->postmeta WHERE meta_key='_joomla_zoo_id'");
+
+    $posts = $wpdb->get_results($wpdb->prepare(
+        "SELECT p.ID, p.post_title, pm.meta_value as zoo_id
+         FROM $wpdb->posts p
+         JOIN $wpdb->postmeta pm ON p.ID=pm.post_id AND pm.meta_key='_joomla_zoo_id'
+         ORDER BY p.ID ASC LIMIT %d, %d",
+        $offset, $batch
+    ));
+
+    echo "<div class='card'><h2>Re-importando contenido de TODOS los posts ($offset / $total)</h2><div class='log'>";
+
+    $updated = 0; $skipped = 0;
+
+    foreach ($posts as $post) {
+        $zoo_id = intval($post->zoo_id);
+
+        $jr = $j->query("SELECT elements FROM jos_zoo_item WHERE id=$zoo_id");
+        if (!$jr || $jr->num_rows == 0) {
+            lm("Skip: ID:{$post->ID} (Zoo:$zoo_id) no encontrado en Joomla", 'error');
+            $skipped++;
+            continue;
+        }
+        $jrow = $jr->fetch_assoc();
+
+        $content = extract_content($jrow['elements']);
+        if (empty(trim(strip_tags($content)))) {
+            lm("Skip: ID:{$post->ID} contenido vacío en Joomla", 'warn');
+            $skipped++;
+            continue;
+        }
+
+        // Fix images
+        $img_r = fix_joomla_image_urls($content);
+        $content = $img_r['html'];
+
+        // Fix base64
+        $b64_r = fix_base64_in_string($content, $post->ID);
+        $content = $b64_r['html'];
+
+        $wpdb->update($wpdb->posts, ['post_content' => $content], ['ID' => $post->ID]);
+        clean_post_cache($post->ID);
+
+        $extras = [];
+        if ($img_r['fixed'] > 0) $extras[] = "{$img_r['fixed']}imgs";
+        if ($b64_r['fixed'] > 0) $extras[] = "{$b64_r['fixed']}b64";
+        $extra_txt = !empty($extras) ? ' (' . implode(', ', $extras) . ')' : '';
+
+        lm("Actualizado: {$post->post_title} (ID:{$post->ID})$extra_txt", 'success');
+        $updated++;
+    }
+
+    echo "</div></div>";
+
+    echo "<div class='stat-grid'>";
+    echo "<div class='stat-box ok'><div class='number'>$updated</div><div class='label'>Actualizados</div></div>";
+    echo "<div class='stat-box'><div class='number'>$skipped</div><div class='label'>Saltados</div></div>";
+    echo "</div>";
+
+    $processed = $offset + count($posts);
+    $pct = $total > 0 ? min(100, round(($processed / $total) * 100)) : 100;
+    echo "<div class='card'><div class='progress'><div class='fill' style='width:{$pct}%'>$pct%</div></div>";
+
+    if (count($posts) >= $batch && $processed < $total) {
+        $next = $offset + $batch;
+        $url = "?action=force_sync&offset=$next&batch=$batch";
+        echo "<script>setTimeout(function(){window.location.href='$url';},1000);</script>";
+        echo "<a href='$url' class='btn btn-blue'>Siguiente</a> <a href='?action=audit' class='btn btn-gray'>Detener</a>";
+    } else {
+        echo "<p style='color:#7ee787;font-weight:bold'>Sincronización forzada completada.</p>";
+        echo "<a href='?action=audit' class='btn btn-blue'>Auditoría Final</a>";
+    }
+    echo "</div>";
+    pf();
+}
+
+// ============================================================
 // FIX ALL (secuencial)
 // ============================================================
 function do_fix_all($step, $offset, $batch) {
@@ -797,6 +886,7 @@ switch ($action) {
     case 'fix_images':     do_fix_images(); break;
     case 'fix_base64':     do_fix_base64($offset, $batch); break;
     case 'import_missing': do_import_missing($offset, $batch); break;
+    case 'force_sync':     do_force_sync($offset, $batch); break;
     case 'fix_all':        do_fix_all($step, $offset, $batch); break;
     default:               do_audit();
 }
