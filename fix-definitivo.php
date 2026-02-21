@@ -15,6 +15,7 @@
 
 set_time_limit(300);
 ini_set('memory_limit', '1024M');
+ini_set('pcre.backtrack_limit', '10000000');
 ini_set('display_errors', 1);
 error_reporting(E_ALL);
 
@@ -548,25 +549,33 @@ function do_fix_base64($offset, $batch) {
             }
         }
 
-        // B) If WP content is short/empty but Joomla has base64, recover it
-        if (strlen($post->post_content) < 50) {
-            $zoo_id = intval($post->zoo_id);
-            $jr = $j->query("SELECT elements FROM jos_zoo_item WHERE id=$zoo_id");
-            if ($jr && $jr->num_rows > 0) {
-                $jrow = $jr->fetch_assoc();
-                if (strpos($jrow['elements'], 'data:image') !== false) {
-                    $jcontent = extract_content($jrow['elements']);
-                    if (!empty(trim(strip_tags($jcontent)))) {
-                        // Fix images and base64 in recovered content
-                        $img_r = fix_joomla_image_urls($jcontent);
-                        $jcontent = $img_r['html'];
-                        $b64_r = fix_base64_in_string($jcontent, $post->ID);
-                        $jcontent = $b64_r['html'];
+        // B) Check Joomla source for base64
+        // Check if Joomla has base64 regardless of WP content length
+        $zoo_id = intval($post->zoo_id);
+        $jr = $j->query("SELECT elements FROM jos_zoo_item WHERE id=$zoo_id");
 
-                        $content = $jcontent;
-                        $recovered_b64 += $b64_r['fixed'];
-                        $changed = true;
-                        lm("Recuperado con base64: {$post->post_title} ({$b64_r['fixed']} imgs)", 'success');
+        if ($jr && $jr->num_rows > 0) {
+            $jrow = $jr->fetch_assoc();
+            if (strpos($jrow['elements'], 'data:image') !== false) {
+                // Joomla has base64! Re-extract content to ensure we have the images
+                $jcontent = extract_content($jrow['elements']);
+
+                if (!empty(trim(strip_tags($jcontent)))) {
+                    // Fix images and base64 in recovered content
+                    $img_r = fix_joomla_image_urls($jcontent);
+                    $jcontent = $img_r['html'];
+                    $b64_r = fix_base64_in_string($jcontent, $post->ID);
+                    $jcontent = $b64_r['html'];
+
+                    // If we found and converted base64 images, update content
+                    if ($b64_r['fixed'] > 0) {
+                        // Only update if different
+                        if ($content !== $jcontent) {
+                            $content = $jcontent;
+                            $recovered_b64 += $b64_r['fixed'];
+                            $changed = true;
+                            lm("Recuperado con base64 desde Joomla: {$post->post_title} ({$b64_r['fixed']} imgs)", 'success');
+                        }
                     }
                 }
             }
