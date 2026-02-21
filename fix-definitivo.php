@@ -548,8 +548,10 @@ function do_fix_base64($offset, $batch) {
             }
         }
 
-        // B) If WP content is short/empty but Joomla has base64, recover it
-        if (strlen($post->post_content) < 50) {
+        // B) Check against Joomla content if we suspect base64 might be missing
+        // If WP content has base64, we processed it in (A).
+        // If not, we check if Joomla has base64.
+        if (!$changed) {
             $zoo_id = intval($post->zoo_id);
             $jr = $j->query("SELECT elements FROM jos_zoo_item WHERE id=$zoo_id");
             if ($jr && $jr->num_rows > 0) {
@@ -563,10 +565,13 @@ function do_fix_base64($offset, $batch) {
                         $b64_r = fix_base64_in_string($jcontent, $post->ID);
                         $jcontent = $b64_r['html'];
 
-                        $content = $jcontent;
-                        $recovered_b64 += $b64_r['fixed'];
-                        $changed = true;
-                        lm("Recuperado con base64: {$post->post_title} ({$b64_r['fixed']} imgs)", 'success');
+                        // If base64 was fixed, update WP content
+                        if ($b64_r['fixed'] > 0) {
+                            $content = $jcontent;
+                            $recovered_b64 += $b64_r['fixed'];
+                            $changed = true;
+                            lm("Recuperado faltante base64: {$post->post_title} (+{$b64_r['fixed']} imgs)", 'success');
+                        }
                     }
                 }
             }
