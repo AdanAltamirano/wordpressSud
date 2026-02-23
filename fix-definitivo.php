@@ -683,6 +683,24 @@ function do_fix_base64($offset, $batch) {
         $content = $post->post_content;
         $changed = false;
 
+        // C) Check specifically for the known UUID with base64 in Joomla, regardless of WP content length
+        // This addresses the "perro.json" case where content length > 50 but image is missing.
+        if (strpos($content, 'data:image') === false && strpos($content, 'imported-content') === false) {
+             $zoo_id = intval($post->zoo_id);
+             $jr = $j->query("SELECT elements FROM jos_zoo_item WHERE id=$zoo_id AND elements LIKE '%2e3c9e69-1f9e-4647-8d13-4e88094d2790%' AND elements LIKE '%data:image%'");
+             if ($jr && $jr->num_rows > 0) {
+                 $jrow = $jr->fetch_assoc();
+                 $jcontent = extract_content($jrow['elements']);
+
+                 // If extracted content has base64, update content variable so Block A can process it
+                 if (strpos($jcontent, 'data:image') !== false) {
+                     lm("Found missing base64 image in Joomla for Zoo ID $zoo_id. Recovering...", 'warning');
+                     $content = $jcontent;
+                     // We don't save to DB yet, we let Block A handle the base64 conversion and save
+                 }
+             }
+        }
+
         // A) If WP content has base64, convert them to files
         if (strpos($content, 'data:image') !== false) {
             $r = fix_base64_in_string($content, $post->ID);
