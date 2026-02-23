@@ -153,7 +153,7 @@ function fix_joomla_image_urls($html) {
 // ============================================================
 // SAVE BASE64 IMAGE AS FILE
 // ============================================================
-function save_base64_image($base64_data, $mime_type, $post_id = 0) {
+function save_base64_image($base64_data, $mime_type, $post_id = 0, $set_featured = false) {
     // Determine extension
     $ext_map = [
         'image/jpeg' => 'jpg', 'image/jpg' => 'jpg',
@@ -188,20 +188,24 @@ function save_base64_image($base64_data, $mime_type, $post_id = 0) {
 
     wp_update_attachment_metadata($attach_id, wp_generate_attachment_metadata($attach_id, $filepath));
 
+    if ($set_featured && $post_id > 0) {
+        set_post_thumbnail($post_id, $attach_id);
+    }
+
     return $upload_dir['url'] . '/' . $filename;
 }
 
 // ============================================================
 // FIX BASE64 IMAGES IN HTML
 // ============================================================
-function fix_base64_in_string($html, $post_id = 0) {
+function fix_base64_in_string($html, $post_id = 0, $set_featured = false) {
     $count = 0;
     $html = preg_replace_callback(
         '/src=["\']data:image\/([\w\+]+);base64,([A-Za-z0-9+\/=\s]+)["\']/i',
-        function($m) use (&$count, $post_id) {
+        function($m) use (&$count, $post_id, $set_featured) {
             $mime = 'image/' . $m[1];
             $data = preg_replace('/\s+/', '', $m[2]);
-            $url = save_base64_image($data, $mime, $post_id);
+            $url = save_base64_image($data, $mime, $post_id, $set_featured);
             if ($url) {
                 $count++;
                 return 'src="' . $url . '"';
@@ -663,6 +667,51 @@ function do_fix_base64($offset, $batch) {
 
     // First, fix base64 already in WP posts
     echo "<div class='card'><h2>Convirtiendo base64 a archivos (lote $offset)</h2><div class='log'>";
+
+    // TARGETED FIX FOR PERRO (Zoo ID 25436) to ensure it appears in grid with image
+    if ($offset == 0) {
+        $perro_zoo_id = 25436;
+        $perro_post_id = $wpdb->get_var($wpdb->prepare("SELECT post_id FROM $wpdb->postmeta WHERE meta_key='_joomla_zoo_id' AND meta_value=%s LIMIT 1", $perro_zoo_id));
+
+        if ($perro_post_id) {
+            $p = get_post($perro_post_id);
+            $has_thumb = has_post_thumbnail($perro_post_id);
+            $has_b64 = strpos($p->post_content, 'data:image') !== false;
+            $has_imported = strpos($p->post_content, 'imported-content') !== false;
+
+            // If in trash, or missing image, or missing thumbnail -> FORCE RECOVER
+            if ($p && ($p->post_status === 'trash' || (!$has_b64 && !$has_imported) || !$has_thumb)) {
+                lm("FORCE FIX: 'Perro' post (ID:$perro_post_id) found. Status:{$p->post_status}, Thumb:" . ($has_thumb?'Yes':'NO'), 'warn');
+
+                // 1. Untrash if needed
+                if ($p->post_status === 'trash') {
+                    $wpdb->update($wpdb->posts, ['post_status' => 'publish'], ['ID' => $perro_post_id]);
+                    clean_post_cache($perro_post_id);
+                    lm("  -> Restored from Trash to Publish", 'success');
+                }
+
+                // 2. Re-fetch content from Joomla to get the image
+                $jr = $j->query("SELECT elements FROM jos_zoo_item WHERE id=$perro_zoo_id AND elements LIKE '%2e3c9e69-1f9e-4647-8d13-4e88094d2790%'");
+                if ($jr && $jr->num_rows > 0) {
+                    $jrow = $jr->fetch_assoc();
+                    $jcontent = extract_content($jrow['elements']);
+
+                    if (strpos($jcontent, 'data:image') !== false) {
+                        // 3. Process base64 AND set as featured image
+                        $b64_r = fix_base64_in_string($jcontent, $perro_post_id, true); // true = set featured
+
+                        // 4. Update post content
+                        $wpdb->update($wpdb->posts, ['post_content' => $b64_r['html']], ['ID' => $perro_post_id]);
+                        clean_post_cache($perro_post_id);
+
+                        lm("  -> Recovered content & Set Featured Image ({$b64_r['fixed']} imgs)", 'success');
+                    } else {
+                        lm("  -> Warning: Source Joomla item exists but 'data:image' not found in extraction.", 'error');
+                    }
+                }
+            }
+        }
+    }
 
     // Get ALL posts that have _joomla_zoo_id (any status except trash)
     // We process in batches to avoid timeout
