@@ -67,25 +67,63 @@ function build_file_index() {
 }
 
 // ============================================================
-// EXTRACT ZOO CONTENT
+// EXTRACT ZOO CONTENT (mejorado: busca en TODOS los UUIDs)
 // ============================================================
 function extract_content($elements_json) {
     $e = json_decode($elements_json, true);
     if (!$e || !is_array($e)) return '';
+
+    // Lista de UUIDs conocidos para contenido principal (textarea/wysiwyg)
+    $content_uuids = [
+        '2e3c9e69-1f9e-4647-8d13-4e88094d2790', // UUID principal conocido
+    ];
+
     $content = '';
-    $uuid = '2e3c9e69-1f9e-4647-8d13-4e88094d2790';
-    if (isset($e[$uuid]) && is_array($e[$uuid])) {
-        foreach ($e[$uuid] as $item) {
-            if (isset($item['value']) && is_string($item['value']) && strlen($item['value']) > 10)
-                $content .= $item['value'] . "\n";
+
+    // PASO 1: Intentar con UUIDs conocidos
+    foreach ($content_uuids as $uuid) {
+        if (isset($e[$uuid]) && is_array($e[$uuid])) {
+            foreach ($e[$uuid] as $item) {
+                if (isset($item['value']) && is_string($item['value']) && strlen($item['value']) > 10)
+                    $content .= $item['value'] . "\n";
+            }
         }
     }
+
+    // PASO 2: Si no encontró con UUID conocido, buscar en TODOS los UUIDs
+    // Busca arrays que contengan items con 'value' que sea HTML largo (probable textarea)
+    if (empty(trim(strip_tags($content)))) {
+        $candidates = [];
+        foreach ($e as $uuid => $items) {
+            if (!is_array($items)) continue;
+            foreach ($items as $item) {
+                if (!is_array($item)) continue;
+                if (isset($item['value']) && is_string($item['value'])) {
+                    $val = $item['value'];
+                    $text_len = strlen(trim(strip_tags($val)));
+                    $is_html = ($val !== strip_tags($val));
+                    // Candidato: tiene HTML y más de 30 chars, o texto plano > 100 chars
+                    if (($is_html && $text_len > 20) || $text_len > 100) {
+                        $candidates[] = ['uuid' => $uuid, 'value' => $val, 'len' => $text_len, 'html' => $is_html];
+                    }
+                }
+            }
+        }
+        // Ordenar por longitud descendente y tomar el más largo (es el contenido principal)
+        usort($candidates, function($a, $b) { return $b['len'] - $a['len']; });
+        foreach ($candidates as $c) {
+            $content .= $c['value'] . "\n";
+        }
+    }
+
+    // PASO 3: Último recurso - walk recursivo
     if (empty(trim(strip_tags($content)))) {
         array_walk_recursive($e, function($v, $k) use (&$content) {
             if ($k === 'value' && is_string($v) && (strlen($v) > 100 || ($v !== strip_tags($v) && strlen($v) > 30)))
                 $content .= $v . "\n";
         });
     }
+
     return trim($content);
 }
 
@@ -207,6 +245,7 @@ function page_header($title) {
     echo "<a href='?action=fix_base64' class='btn btn-yellow'>4. Fix Base64</a>";
     echo "<a href='?action=import_missing' class='btn btn-green'>5. Importar</a>";
     echo "<a href='?action=fix_all' class='btn btn-green' style='background:#1f6feb'>Fix Todo</a>";
+    echo "<a href='?action=diagnose_empty' class='btn btn-gray' style='margin-left:12px'>Diagnosticar vacíos</a>";
     echo "</div>";
 }
 function pf() { echo "</div></body></html>"; }
@@ -220,55 +259,160 @@ function do_audit() {
     page_header('Auditoría Definitiva');
     $j = jdb();
 
-    $j_pub = $j->query("SELECT COUNT(*) c FROM jos_zoo_item WHERE type IN('article','page') AND state=1")->fetch_assoc()['c'];
-    $j_auth = $j->query("SELECT COUNT(*) c FROM jos_zoo_item WHERE type='author'")->fetch_assoc()['c'];
-    $j_b64 = $j->query("SELECT COUNT(*) c FROM jos_zoo_item WHERE type='article' AND state=1 AND elements LIKE '%data:image%'")->fetch_assoc()['c'];
+    // ---- JOOMLA: desglose completo por tipo y estado ----
+    $j_art_pub   = $j->query("SELECT COUNT(*) c FROM jos_zoo_item WHERE type='article' AND state=1")->fetch_assoc()['c'];
+    $j_art_unpub = $j->query("SELECT COUNT(*) c FROM jos_zoo_item WHERE type='article' AND state=0")->fetch_assoc()['c'];
+    $j_art_other = $j->query("SELECT COUNT(*) c FROM jos_zoo_item WHERE type='article' AND state NOT IN(0,1)")->fetch_assoc()['c'];
+    $j_art_total = $j_art_pub + $j_art_unpub + $j_art_other;
+    $j_page_pub  = $j->query("SELECT COUNT(*) c FROM jos_zoo_item WHERE type='page' AND state=1")->fetch_assoc()['c'];
+    $j_page_unpub= $j->query("SELECT COUNT(*) c FROM jos_zoo_item WHERE type='page' AND state!=1")->fetch_assoc()['c'];
+    $j_auth_pub  = $j->query("SELECT COUNT(*) c FROM jos_zoo_item WHERE type='author' AND state=1")->fetch_assoc()['c'];
+    $j_auth_unpub= $j->query("SELECT COUNT(*) c FROM jos_zoo_item WHERE type='author' AND state!=1")->fetch_assoc()['c'];
+    $j_auth_total= $j_auth_pub + $j_auth_unpub;
+    $j_all_items = $j->query("SELECT COUNT(*) c FROM jos_zoo_item")->fetch_assoc()['c'];
+    // Todos los artículos+páginas (cualquier estado, excluyendo autores)
+    $j_content_total = $j_art_total + $j_page_pub + $j_page_unpub;
+    $j_b64_all   = $j->query("SELECT COUNT(*) c FROM jos_zoo_item WHERE type IN('article','page') AND elements LIKE '%data:image%'")->fetch_assoc()['c'];
 
-    $wp_pub = $wpdb->get_var("SELECT COUNT(*) FROM $wpdb->posts WHERE post_type='post' AND post_status='publish'");
+    // ---- WORDPRESS ----
+    $wp_pub     = $wpdb->get_var("SELECT COUNT(*) FROM $wpdb->posts WHERE post_type='post' AND post_status='publish'");
+    $wp_draft   = $wpdb->get_var("SELECT COUNT(*) FROM $wpdb->posts WHERE post_type='post' AND post_status='draft'");
+    $wp_trash   = $wpdb->get_var("SELECT COUNT(*) FROM $wpdb->posts WHERE post_type='post' AND post_status='trash'");
+    $wp_pending = $wpdb->get_var("SELECT COUNT(*) FROM $wpdb->posts WHERE post_type='post' AND post_status='pending'");
+    $wp_total   = $wpdb->get_var("SELECT COUNT(*) FROM $wpdb->posts WHERE post_type='post'");
     $wp_tracked = $wpdb->get_var("SELECT COUNT(*) FROM $wpdb->postmeta WHERE meta_key='_joomla_zoo_id'");
 
-    // Duplicates by zoo_id
-    $dup_zoo = $wpdb->get_var("SELECT COUNT(*) FROM (SELECT meta_value, COUNT(*) cnt FROM $wpdb->postmeta WHERE meta_key='_joomla_zoo_id' GROUP BY meta_value HAVING cnt>1) t");
-    $dup_excess = $wpdb->get_var("SELECT COALESCE(SUM(cnt-1),0) FROM (SELECT meta_value, COUNT(*) cnt FROM $wpdb->postmeta WHERE meta_key='_joomla_zoo_id' GROUP BY meta_value HAVING cnt>1) t");
+    // Duplicates by zoo_id (EXCLUDING trashed posts - dedup already handled them)
+    $dup_zoo    = $wpdb->get_var("SELECT COUNT(*) FROM (
+        SELECT pm.meta_value, COUNT(*) cnt FROM $wpdb->postmeta pm
+        JOIN $wpdb->posts p ON p.ID=pm.post_id
+        WHERE pm.meta_key='_joomla_zoo_id' AND p.post_status NOT IN('trash','inherit')
+        GROUP BY pm.meta_value HAVING cnt>1) t");
+    $dup_excess = $wpdb->get_var("SELECT COALESCE(SUM(cnt-1),0) FROM (
+        SELECT pm.meta_value, COUNT(*) cnt FROM $wpdb->postmeta pm
+        JOIN $wpdb->posts p ON p.ID=pm.post_id
+        WHERE pm.meta_key='_joomla_zoo_id' AND p.post_status NOT IN('trash','inherit')
+        GROUP BY pm.meta_value HAVING cnt>1) t");
 
-    // Empty content
-    $empty = $wpdb->get_var("SELECT COUNT(*) FROM $wpdb->posts p JOIN $wpdb->postmeta pm ON p.ID=pm.post_id AND pm.meta_key='_joomla_zoo_id' WHERE p.post_type='post' AND p.post_status='publish' AND LENGTH(p.post_content)<50");
+    // Empty content (any status except trash)
+    $empty = $wpdb->get_var("SELECT COUNT(*) FROM $wpdb->posts p JOIN $wpdb->postmeta pm ON p.ID=pm.post_id AND pm.meta_key='_joomla_zoo_id' WHERE p.post_type='post' AND p.post_status NOT IN('trash','inherit') AND LENGTH(p.post_content)<50");
 
-    // Broken images
-    $broken_img = $wpdb->get_var("SELECT COUNT(*) FROM $wpdb->posts WHERE post_type='post' AND post_status='publish' AND post_content LIKE '%src=\"images/%'");
+    // Broken images (any status)
+    $broken_img = $wpdb->get_var("SELECT COUNT(*) FROM $wpdb->posts WHERE post_type='post' AND post_status NOT IN('trash','inherit') AND post_content LIKE '%src=\"images/%'");
 
-    // Base64 in WP
-    $wp_b64 = $wpdb->get_var("SELECT COUNT(*) FROM $wpdb->posts WHERE post_type='post' AND post_status='publish' AND post_content LIKE '%data:image%'");
+    // Base64 in WP (any status)
+    $wp_b64 = $wpdb->get_var("SELECT COUNT(*) FROM $wpdb->posts WHERE post_type='post' AND post_status NOT IN('trash','inherit') AND post_content LIKE '%data:image%'");
 
-    // Missing posts
-    $imported = array_flip($wpdb->get_col("SELECT meta_value FROM $wpdb->postmeta WHERE meta_key='_joomla_zoo_id'"));
-    $r = $j->query("SELECT id FROM jos_zoo_item WHERE type IN('article','page') AND state=1");
-    $missing = 0;
-    while ($row = $r->fetch_assoc()) { if (!isset($imported[$row['id']])) $missing++; }
+    // Missing posts: ALL articles+pages from Joomla (any state), not just published
+    // Only count zoo_ids from NON-trashed posts as "imported"
+    $imported = array_flip($wpdb->get_col("
+        SELECT pm.meta_value FROM $wpdb->postmeta pm
+        JOIN $wpdb->posts p ON p.ID=pm.post_id
+        WHERE pm.meta_key='_joomla_zoo_id' AND p.post_status NOT IN('trash','inherit')
+    "));
+    $r = $j->query("SELECT id, state FROM jos_zoo_item WHERE type IN('article','page')");
+    $missing_pub = 0; $missing_unpub = 0; $missing_total = 0;
+    while ($row = $r->fetch_assoc()) {
+        if (!isset($imported[$row['id']])) {
+            $missing_total++;
+            if ($row['state'] == 1) $missing_pub++; else $missing_unpub++;
+        }
+    }
 
+    // ---- STAT BOXES ----
     echo "<div class='stat-grid'>";
     echo "<div class='stat-box" . ($dup_excess > 0 ? '' : ' ok') . "'><div class='number'>$dup_excess</div><div class='label'>Duplicados (zoo_id)</div></div>";
     echo "<div class='stat-box" . ($empty > 0 ? ' warn' : ' ok') . "'><div class='number'>$empty</div><div class='label'>Posts vacíos</div></div>";
     echo "<div class='stat-box" . ($broken_img > 0 ? '' : ' ok') . "'><div class='number'>$broken_img</div><div class='label'>src=\"images/...\"</div></div>";
-    echo "<div class='stat-box" . ($wp_b64 > 0 ? ' warn' : ' ok') . "'><div class='number'>$wp_b64 / $j_b64</div><div class='label'>Base64 WP/Joomla</div></div>";
-    echo "<div class='stat-box" . ($missing > 0 ? '' : ' ok') . "'><div class='number'>$missing</div><div class='label'>Faltan importar</div></div>";
+    echo "<div class='stat-box" . ($wp_b64 > 0 ? ' warn' : ' ok') . "'><div class='number'>$wp_b64 / $j_b64_all</div><div class='label'>Base64 WP/Joomla</div></div>";
+    echo "<div class='stat-box" . ($missing_total > 0 ? '' : ' ok') . "'><div class='number'>$missing_total</div><div class='label'>Faltan importar</div></div>";
     echo "<div class='stat-box ok'><div class='number'>$wp_pub</div><div class='label'>WP publicados</div></div>";
     echo "</div>";
 
+    // ---- DESGLOSE JOOMLA ----
+    echo "<div class='card'><h2>Inventario Joomla Zoo (TODOS los items)</h2><div class='log'>";
+    lm("=== ARTÍCULOS (type=article) ===", 'info');
+    lm("  Publicados (state=1):    $j_art_pub", 'success');
+    lm("  No publicados (state=0): $j_art_unpub", $j_art_unpub > 0 ? 'warn' : 'info');
+    if ($j_art_other > 0) lm("  Otros estados:           $j_art_other", 'warn');
+    lm("  TOTAL artículos:         $j_art_total", 'info');
+
+    lm("", 'info');
+    lm("=== PÁGINAS (type=page) ===", 'info');
+    lm("  Publicadas: $j_page_pub | No publicadas: $j_page_unpub", 'info');
+
+    lm("", 'info');
+    lm("=== AUTORES (type=author) ===", 'info');
+    lm("  Publicados: $j_auth_pub | No publicados: $j_auth_unpub | Total: $j_auth_total", 'info');
+
+    lm("", 'info');
+    lm("=== RESUMEN JOOMLA ===", 'info');
+    lm("  Total items en Zoo: $j_all_items", 'info');
+    lm("  Artículos+Páginas (TODOS los estados): $j_content_total", 'info');
+    lm("  Con base64 embebida: $j_b64_all", 'info');
+    echo "</div></div>";
+
+    // ---- DESGLOSE WORDPRESS ----
+    echo "<div class='card'><h2>Inventario WordPress</h2><div class='log'>";
+    lm("=== POSTS POR ESTADO ===", 'info');
+    lm("  Publicados:  $wp_pub", 'success');
+    lm("  Borradores:  $wp_draft", $wp_draft > 0 ? 'warn' : 'info');
+    lm("  Pendientes:  $wp_pending", $wp_pending > 0 ? 'warn' : 'info');
+    lm("  Papelera:    $wp_trash", $wp_trash > 0 ? 'warn' : 'info');
+    lm("  TOTAL posts: $wp_total", 'info');
+    lm("  Con _joomla_zoo_id: $wp_tracked", 'info');
+    echo "</div></div>";
+
+    // ---- COMPARACIÓN ----
+    echo "<div class='card'><h2>Comparación 1 a 1</h2><div class='log'>";
+    lm("=== FALTANTES ===", $missing_total > 0 ? 'error' : 'success');
+    lm("  Publicados en Joomla, no en WP: $missing_pub", $missing_pub > 0 ? 'error' : 'success');
+    lm("  No publicados en Joomla, no en WP: $missing_unpub", $missing_unpub > 0 ? 'warn' : 'info');
+    lm("  TOTAL faltantes: $missing_total", $missing_total > 0 ? 'error' : 'success');
+
+    lm("", 'info');
+    lm("=== DUPLICADOS ===", $dup_excess > 0 ? 'error' : 'success');
+    lm("  Zoo_ids repetidos: $dup_zoo grupos = $dup_excess posts sobrantes", $dup_excess > 0 ? 'error' : 'success');
+
+    lm("", 'info');
+    lm("=== CONTENIDO ===", 'info');
+    lm("  Posts vacíos (<50 chars): $empty", $empty > 0 ? 'warn' : 'success');
+    lm("  Imágenes rotas (src=\"images/...\"): $broken_img", $broken_img > 0 ? 'error' : 'success');
+    lm("  Base64: $j_b64_all en Joomla, $wp_b64 en WP", ($j_b64_all > $wp_b64) ? 'warn' : 'success');
+
+    // Show some missing if any
+    if ($missing_total > 0) {
+        lm("", 'info');
+        lm("=== MUESTRA DE FALTANTES ===", 'warn');
+        $r = $j->query("SELECT id, name, type, state FROM jos_zoo_item WHERE type IN('article','page') ORDER BY id DESC");
+        $shown = 0;
+        while ($row = $r->fetch_assoc()) {
+            if (!isset($imported[$row['id']])) {
+                $st = $row['state'] == 1 ? 'PUB' : 'NOPUB';
+                lm("  Zoo:{$row['id']} [$st] {$row['type']} | {$row['name']}", $row['state'] == 1 ? 'error' : 'warn');
+                $shown++;
+                if ($shown >= 20) { lm("  ... y " . ($missing_total - 20) . " más", 'warn'); break; }
+            }
+        }
+    }
+
+    echo "</div></div>";
+
+    // ---- PLAN DE EJECUCIÓN ----
     echo "<div class='card'><h2>Plan de ejecución</h2>";
     echo "<div style='line-height:2.5;'>";
 
     $s1 = $dup_excess > 0 ? 'active' : 'done';
     $s2 = $empty > 0 ? 'active' : 'done';
     $s3 = $broken_img > 0 ? 'active' : 'done';
-    $s4 = ($wp_b64 > 0 || $j_b64 > $wp_b64) ? 'active' : 'done';
-    $s5 = $missing > 0 ? 'active' : 'done';
+    $s4 = ($wp_b64 > 0 || $j_b64_all > $wp_b64) ? 'active' : 'done';
+    $s5 = $missing_total > 0 ? 'active' : 'done';
 
-    echo "<span class='step $s1'>1</span><strong>Deduplicar por zoo_id</strong> — $dup_excess posts sobrantes (mismo artículo importado varias veces) ";
+    echo "<span class='step $s1'>1</span><strong>Deduplicar</strong> — $dup_excess posts sobrantes (mismo zoo_id importado varias veces) ";
     if ($dup_excess > 0) echo "<a href='?action=dedup' class='btn btn-red'>Ejecutar</a>";
     echo "<br>";
 
-    echo "<span class='step $s2'>2</span><strong>Recuperar contenido</strong> — $empty posts vacíos, re-extraer desde Joomla (incluye base64 → archivo) ";
+    echo "<span class='step $s2'>2</span><strong>Recuperar contenido</strong> — $empty posts vacíos → re-extraer desde Joomla ";
     if ($empty > 0) echo "<a href='?action=recover' class='btn btn-green'>Ejecutar</a>";
     echo "<br>";
 
@@ -276,26 +420,15 @@ function do_audit() {
     if ($broken_img > 0) echo "<a href='?action=fix_images' class='btn btn-yellow'>Ejecutar</a>";
     echo "<br>";
 
-    echo "<span class='step $s4'>4</span><strong>Fix base64</strong> — $j_b64 artículos en Joomla tienen base64, solo $wp_b64 en WP. Extraer a archivos. ";
-    if ($j_b64 > 0) echo "<a href='?action=fix_base64' class='btn btn-yellow'>Ejecutar</a>";
+    echo "<span class='step $s4'>4</span><strong>Fix base64</strong> — $j_b64_all en Joomla → extraer a archivos ";
+    if ($j_b64_all > 0) echo "<a href='?action=fix_base64' class='btn btn-yellow'>Ejecutar</a>";
     echo "<br>";
 
-    echo "<span class='step $s5'>5</span><strong>Importar faltantes</strong> — $missing posts no importados ";
-    if ($missing > 0) echo "<a href='?action=import_missing' class='btn btn-green'>Ejecutar</a>";
+    echo "<span class='step $s5'>5</span><strong>Importar faltantes</strong> — $missing_pub publicados + $missing_unpub no publicados = $missing_total total ";
+    if ($missing_total > 0) echo "<a href='?action=import_missing' class='btn btn-green'>Ejecutar</a>";
     echo "<br>";
 
     echo "<br><a href='?action=fix_all' class='btn btn-green' style='background:#1f6feb;font-size:16px;padding:12px 24px'>Ejecutar TODO en secuencia</a>";
-    echo "</div></div>";
-
-    // Detail
-    echo "<div class='card'><h2>Detalle</h2><div class='log'>";
-    lm("Joomla: $j_pub artículos pub + $j_auth autores", 'info');
-    lm("WordPress: $wp_pub posts pub, $wp_tracked con zoo_id", 'info');
-    lm("Duplicados: $dup_zoo zoo_ids repetidos = $dup_excess posts sobrantes", $dup_excess > 0 ? 'error' : 'success');
-    lm("Vacíos: $empty posts con <50 chars (recuperables de Joomla)", $empty > 0 ? 'warn' : 'success');
-    lm("Imágenes rotas: $broken_img posts con rutas Joomla", $broken_img > 0 ? 'error' : 'success');
-    lm("Base64: $j_b64 en Joomla, $wp_b64 en WP (falta convertir " . ($j_b64 - $wp_b64) . ")", ($j_b64 > $wp_b64) ? 'warn' : 'success');
-    lm("Faltantes: $missing posts no importados", $missing > 0 ? 'warn' : 'success');
     echo "</div></div>";
 
     pf();
@@ -308,15 +441,27 @@ function do_dedup($offset, $batch) {
     global $wpdb;
     page_header('Paso 1: Deduplicar');
 
-    $total_groups = $wpdb->get_var("SELECT COUNT(*) FROM (SELECT meta_value FROM $wpdb->postmeta WHERE meta_key='_joomla_zoo_id' GROUP BY meta_value HAVING COUNT(*)>1) t");
-    $total_excess = $wpdb->get_var("SELECT COALESCE(SUM(cnt-1),0) FROM (SELECT meta_value, COUNT(*) cnt FROM $wpdb->postmeta WHERE meta_key='_joomla_zoo_id' GROUP BY meta_value HAVING cnt>1) t");
+    // Only count non-trashed posts for dedup (trashed already handled)
+    $total_groups = $wpdb->get_var("SELECT COUNT(*) FROM (
+        SELECT pm.meta_value FROM $wpdb->postmeta pm
+        JOIN $wpdb->posts p ON p.ID=pm.post_id
+        WHERE pm.meta_key='_joomla_zoo_id' AND p.post_status NOT IN('trash','inherit')
+        GROUP BY pm.meta_value HAVING COUNT(*)>1) t");
+    $total_excess = $wpdb->get_var("SELECT COALESCE(SUM(cnt-1),0) FROM (
+        SELECT pm.meta_value, COUNT(*) cnt FROM $wpdb->postmeta pm
+        JOIN $wpdb->posts p ON p.ID=pm.post_id
+        WHERE pm.meta_key='_joomla_zoo_id' AND p.post_status NOT IN('trash','inherit')
+        GROUP BY pm.meta_value HAVING cnt>1) t");
 
     echo "<div class='card'><h2>Eliminando duplicados por zoo_id (lote $offset)</h2><div class='log'>";
-    lm("Grupos duplicados: $total_groups | Posts sobrantes: $total_excess", 'info');
+    lm("Grupos duplicados (excl. papelera): $total_groups | Posts sobrantes: $total_excess", 'info');
 
-    // Get batch of duplicate zoo_ids
+    // Get batch of duplicate zoo_ids (excluding trashed)
     $dups = $wpdb->get_results($wpdb->prepare(
-        "SELECT meta_value as zoo_id, COUNT(*) cnt FROM $wpdb->postmeta WHERE meta_key='_joomla_zoo_id' GROUP BY meta_value HAVING cnt>1 ORDER BY cnt DESC LIMIT %d, %d",
+        "SELECT pm.meta_value as zoo_id, COUNT(*) cnt FROM $wpdb->postmeta pm
+         JOIN $wpdb->posts p ON p.ID=pm.post_id
+         WHERE pm.meta_key='_joomla_zoo_id' AND p.post_status NOT IN('trash','inherit')
+         GROUP BY pm.meta_value HAVING cnt>1 ORDER BY cnt DESC LIMIT %d, %d",
         $offset, $batch
     ));
 
@@ -379,17 +524,18 @@ function do_recover($offset, $batch) {
     page_header('Paso 2: Recuperar Contenido');
     $j = jdb();
 
+    // Search ALL statuses except trash
     $total = $wpdb->get_var("SELECT COUNT(*) FROM $wpdb->posts p
         JOIN $wpdb->postmeta pm ON p.ID=pm.post_id AND pm.meta_key='_joomla_zoo_id'
-        WHERE p.post_type='post' AND p.post_status='publish' AND LENGTH(p.post_content)<50");
+        WHERE p.post_type='post' AND p.post_status NOT IN('trash','inherit') AND LENGTH(p.post_content)<50");
 
     echo "<div class='card'><h2>Recuperando contenido ($offset / $total)</h2><div class='log'>";
 
     $posts = $wpdb->get_results($wpdb->prepare(
-        "SELECT p.ID, p.post_title, pm.meta_value as zoo_id
+        "SELECT p.ID, p.post_title, p.post_status, pm.meta_value as zoo_id
          FROM $wpdb->posts p
          JOIN $wpdb->postmeta pm ON p.ID=pm.post_id AND pm.meta_key='_joomla_zoo_id'
-         WHERE p.post_type='post' AND p.post_status='publish' AND LENGTH(p.post_content)<50
+         WHERE p.post_type='post' AND p.post_status NOT IN('trash','inherit') AND LENGTH(p.post_content)<50
          ORDER BY p.ID ASC LIMIT %d, %d",
         $offset, $batch
     ));
@@ -518,15 +664,15 @@ function do_fix_base64($offset, $batch) {
     // First, fix base64 already in WP posts
     echo "<div class='card'><h2>Convirtiendo base64 a archivos (lote $offset)</h2><div class='log'>";
 
-    // Get ALL posts that have _joomla_zoo_id and check Joomla for base64
+    // Get ALL posts that have _joomla_zoo_id (any status except trash)
     // We process in batches to avoid timeout
-    $total = $wpdb->get_var("SELECT COUNT(*) FROM $wpdb->postmeta WHERE meta_key='_joomla_zoo_id'");
+    $total = $wpdb->get_var("SELECT COUNT(*) FROM $wpdb->posts p JOIN $wpdb->postmeta pm ON p.ID=pm.post_id AND pm.meta_key='_joomla_zoo_id' WHERE p.post_type='post' AND p.post_status NOT IN('trash','inherit')");
 
     $posts = $wpdb->get_results($wpdb->prepare(
         "SELECT p.ID, p.post_title, p.post_content, pm.meta_value as zoo_id
          FROM $wpdb->posts p
          JOIN $wpdb->postmeta pm ON p.ID=pm.post_id AND pm.meta_key='_joomla_zoo_id'
-         WHERE p.post_type='post' AND p.post_status='publish'
+         WHERE p.post_type='post' AND p.post_status NOT IN('trash','inherit')
          ORDER BY p.ID ASC LIMIT %d, %d",
         $offset, $batch
     ));
@@ -548,15 +694,13 @@ function do_fix_base64($offset, $batch) {
             }
         }
 
-        // B) Check against Joomla content if we suspect base64 might be missing
-        // If WP content has base64, we processed it in (A).
-        // If not, we check if Joomla has base64.
-        if (!$changed) {
+        // B) If WP content is short/empty, check Joomla for base64 OR any content to recover
+        if (strlen($post->post_content) < 50) {
             $zoo_id = intval($post->zoo_id);
-            $jr = $j->query("SELECT elements FROM jos_zoo_item WHERE id=$zoo_id");
+            $jr = $j->query("SELECT type, elements FROM jos_zoo_item WHERE id=$zoo_id");
             if ($jr && $jr->num_rows > 0) {
                 $jrow = $jr->fetch_assoc();
-                if (strpos($jrow['elements'], 'data:image') !== false) {
+                if ($jrow['type'] !== 'author' && strpos($jrow['elements'], 'data:image') !== false) {
                     $jcontent = extract_content($jrow['elements']);
                     if (!empty(trim(strip_tags($jcontent)))) {
                         // Fix images and base64 in recovered content
@@ -565,13 +709,10 @@ function do_fix_base64($offset, $batch) {
                         $b64_r = fix_base64_in_string($jcontent, $post->ID);
                         $jcontent = $b64_r['html'];
 
-                        // If base64 was fixed, update WP content
-                        if ($b64_r['fixed'] > 0) {
-                            $content = $jcontent;
-                            $recovered_b64 += $b64_r['fixed'];
-                            $changed = true;
-                            lm("Recuperado faltante base64: {$post->post_title} (+{$b64_r['fixed']} imgs)", 'success');
-                        }
+                        $content = $jcontent;
+                        $recovered_b64 += $b64_r['fixed'];
+                        $changed = true;
+                        lm("Recuperado con base64: {$post->post_title} ({$b64_r['fixed']} imgs)", 'success');
                     }
                 }
             }
@@ -612,35 +753,71 @@ function do_fix_base64($offset, $batch) {
 // ============================================================
 // PASO 5: IMPORT MISSING
 // ============================================================
+function joomla_state_to_wp($state) {
+    // Joomla: 1=published, 0=unpublished, -1=archived, -2=trashed, 2=pending
+    switch (intval($state)) {
+        case 1:  return 'publish';
+        case 0:  return 'draft';
+        case 2:  return 'pending';
+        case -1: return 'draft';   // archived -> draft
+        case -2: return 'trash';
+        default: return 'draft';
+    }
+}
+
 function do_import_missing($offset, $batch) {
     global $wpdb;
     page_header('Paso 5: Importar Faltantes');
     $j = jdb();
 
-    $imported = array_flip($wpdb->get_col("SELECT meta_value FROM $wpdb->postmeta WHERE meta_key='_joomla_zoo_id'"));
+    // Only count non-trashed posts as "already imported"
+    $imported = array_flip($wpdb->get_col("
+        SELECT pm.meta_value FROM $wpdb->postmeta pm
+        JOIN $wpdb->posts p ON p.ID=pm.post_id
+        WHERE pm.meta_key='_joomla_zoo_id' AND p.post_status NOT IN('trash','inherit')
+    "));
     $cat_map = get_option('joomla_zoo_category_map', []);
 
-    // Rebuild cat_map if empty
+    // Rebuild cat_map if empty - include ALL categories, not just published
     if (empty($cat_map)) {
-        $cats = $j->query("SELECT * FROM jos_zoo_category WHERE published=1 ORDER BY parent ASC");
+        $cats = $j->query("SELECT * FROM jos_zoo_category ORDER BY parent ASC");
         while ($c = $cats->fetch_assoc()) {
             $term = get_term_by('slug', $c['alias'], 'category');
-            if ($term) $cat_map[$c['id']] = $term->term_id;
+            if ($term) {
+                $cat_map[$c['id']] = $term->term_id;
+            } else {
+                // Create category if it doesn't exist
+                $parent_wp = 0;
+                if ($c['parent'] > 0 && isset($cat_map[$c['parent']])) {
+                    $parent_wp = $cat_map[$c['parent']];
+                }
+                $new_term = wp_insert_term($c['name'], 'category', [
+                    'slug'   => $c['alias'],
+                    'parent' => $parent_wp,
+                ]);
+                if (!is_wp_error($new_term)) {
+                    $cat_map[$c['id']] = $new_term['term_id'];
+                }
+            }
         }
         update_option('joomla_zoo_category_map', $cat_map);
     }
 
-    // Get missing items
-    $all_joomla = $j->query("SELECT * FROM jos_zoo_item WHERE type IN('article','page') AND state=1 ORDER BY id ASC");
+    // Get ALL missing items (any state, any type except author)
+    $all_joomla = $j->query("SELECT * FROM jos_zoo_item WHERE type IN('article','page') ORDER BY id ASC");
     $missing_items = [];
     while ($row = $all_joomla->fetch_assoc()) {
         if (!isset($imported[$row['id']])) $missing_items[] = $row;
     }
     $total = count($missing_items);
 
-    echo "<div class='card'><h2>Importando $total posts faltantes (desde $offset)</h2><div class='log'>";
+    // Count by state for display
+    $count_pub = 0; $count_unpub = 0;
+    foreach ($missing_items as $mi) { if ($mi['state'] == 1) $count_pub++; else $count_unpub++; }
 
-    $created = 0; $errors = 0;
+    echo "<div class='card'><h2>Importando $total faltantes ($count_pub pub + $count_unpub no-pub) desde $offset</h2><div class='log'>";
+
+    $created = 0; $errors = 0; $created_pub = 0; $created_draft = 0;
     $slice = array_slice($missing_items, $offset, $batch);
 
     foreach ($slice as $row) {
@@ -660,11 +837,13 @@ function do_import_missing($offset, $batch) {
             if ($u) $wp_author = $u;
         }
 
+        $wp_status = joomla_state_to_wp($row['state']);
+
         $wp_id = wp_insert_post([
             'post_title'        => $row['name'],
             'post_name'         => $row['alias'],
             'post_content'      => $content,
-            'post_status'       => 'publish',
+            'post_status'       => $wp_status,
             'post_date'         => $row['created'],
             'post_date_gmt'     => get_gmt_from_date($row['created']),
             'post_modified'     => $row['modified'],
@@ -703,14 +882,18 @@ function do_import_missing($offset, $batch) {
         if ($b64_r['fixed'] > 0) $extras[] = "{$b64_r['fixed']}b64";
         $extra_txt = !empty($extras) ? ' (' . implode(', ', $extras) . ')' : '';
 
-        lm("Creado: {$row['name']} (Zoo:{$row['id']} → WP:$wp_id)$extra_txt", 'success');
+        $state_label = $wp_status === 'publish' ? 'PUB' : strtoupper($wp_status);
+        lm("Creado [$state_label]: {$row['name']} (Zoo:{$row['id']} → WP:$wp_id)$extra_txt", 'success');
         $created++;
+        if ($wp_status === 'publish') $created_pub++; else $created_draft++;
     }
 
     echo "</div></div>";
 
     echo "<div class='stat-grid'>";
-    echo "<div class='stat-box ok'><div class='number'>$created</div><div class='label'>Creados</div></div>";
+    echo "<div class='stat-box ok'><div class='number'>$created</div><div class='label'>Creados (este lote)</div></div>";
+    echo "<div class='stat-box ok'><div class='number'>$created_pub</div><div class='label'>Como publicados</div></div>";
+    echo "<div class='stat-box warn'><div class='number'>$created_draft</div><div class='label'>Como borrador</div></div>";
     echo "<div class='stat-box'><div class='number'>$errors</div><div class='label'>Errores</div></div>";
     echo "</div>";
 
@@ -757,7 +940,7 @@ function do_fix_all($step, $offset, $batch) {
             // fall through
 
         case 'recover':
-            $remaining = $wpdb->get_var("SELECT COUNT(*) FROM $wpdb->posts p JOIN $wpdb->postmeta pm ON p.ID=pm.post_id AND pm.meta_key='_joomla_zoo_id' WHERE p.post_type='post' AND p.post_status='publish' AND LENGTH(p.post_content)<50");
+            $remaining = $wpdb->get_var("SELECT COUNT(*) FROM $wpdb->posts p JOIN $wpdb->postmeta pm ON p.ID=pm.post_id AND pm.meta_key='_joomla_zoo_id' WHERE p.post_type='post' AND p.post_status NOT IN('trash','inherit') AND LENGTH(p.post_content)<50");
             if ($remaining > 0 || $offset > 0) {
                 do_recover($offset, $batch);
                 return;
@@ -767,7 +950,7 @@ function do_fix_all($step, $offset, $batch) {
             // fall through
 
         case 'fix_images':
-            $remaining = $wpdb->get_var("SELECT COUNT(*) FROM $wpdb->posts WHERE post_type='post' AND post_content LIKE '%src=\"images/%'");
+            $remaining = $wpdb->get_var("SELECT COUNT(*) FROM $wpdb->posts WHERE post_type='post' AND post_status NOT IN('trash','inherit') AND post_content LIKE '%src=\"images/%'");
             if ($remaining > 0) {
                 do_fix_images();
                 echo "<script>setTimeout(function(){window.location.href='?action=fix_all&step=fix_base64&offset=0&batch=$batch';},3000);</script>";
@@ -778,13 +961,166 @@ function do_fix_all($step, $offset, $batch) {
             // fall through
 
         case 'fix_base64':
-            do_fix_base64($offset, $batch);
-            return;
+            // Check if there are still base64 to process
+            $total_b64 = $wpdb->get_var("SELECT COUNT(*) FROM $wpdb->posts p JOIN $wpdb->postmeta pm ON p.ID=pm.post_id AND pm.meta_key='_joomla_zoo_id' WHERE p.post_type='post' AND p.post_status NOT IN('trash','inherit')");
+            $processed_b64 = $offset + $batch;
+            if ($offset < $total_b64) {
+                do_fix_base64($offset, $batch);
+                return;
+            }
+            $step = 'import';
+            $offset = 0;
+            // fall through
 
         case 'import':
             do_import_missing($offset, $batch);
             return;
     }
+}
+
+// ============================================================
+// DIAGNOSE EMPTY POSTS
+// ============================================================
+function do_diagnose_empty() {
+    global $wpdb;
+    page_header('Diagnóstico: Posts Vacíos');
+    $j = jdb();
+
+    $known_uuid = '2e3c9e69-1f9e-4647-8d13-4e88094d2790';
+
+    $empty_posts = $wpdb->get_results("
+        SELECT p.ID, p.post_title, p.post_status, LENGTH(p.post_content) as clen, pm.meta_value as zoo_id
+        FROM $wpdb->posts p
+        JOIN $wpdb->postmeta pm ON p.ID=pm.post_id AND pm.meta_key='_joomla_zoo_id'
+        WHERE p.post_type='post' AND p.post_status NOT IN('trash','inherit') AND LENGTH(p.post_content)<50
+        ORDER BY p.ID ASC
+    ");
+
+    echo "<div class='card'><h2>Posts vacíos en WordPress: " . count($empty_posts) . "</h2>";
+
+    $no_joomla = 0; $is_author = 0; $joomla_empty_too = 0; $joomla_has_content = 0;
+    $uuid_analysis = []; $sample_elements = [];
+
+    foreach ($empty_posts as $ep) {
+        $zoo_id = intval($ep->zoo_id);
+        $jr = $j->query("SELECT id, name, type, state, elements FROM jos_zoo_item WHERE id=$zoo_id");
+        if (!$jr || $jr->num_rows == 0) { $no_joomla++; continue; }
+        $jrow = $jr->fetch_assoc();
+        if ($jrow['type'] === 'author') { $is_author++; continue; }
+
+        $elements = json_decode($jrow['elements'], true);
+        if (!$elements || !is_array($elements)) { $joomla_empty_too++; continue; }
+
+        $has_known_uuid = isset($elements[$known_uuid]);
+        $all_values = [];
+        $all_keys = array_keys($elements);
+
+        array_walk_recursive($elements, function($v, $k) use (&$all_values) {
+            if ($k === 'value' && is_string($v) && strlen($v) > 10) {
+                $all_values[] = ['length' => strlen($v), 'has_html' => ($v !== strip_tags($v)),
+                    'preview' => mb_substr(strip_tags($v), 0, 80)];
+            }
+        });
+
+        foreach ($all_keys as $key) {
+            if (!isset($uuid_analysis[$key])) $uuid_analysis[$key] = 0;
+            $uuid_analysis[$key]++;
+        }
+
+        $has_useful = false;
+        foreach ($all_values as $av) { if ($av['length'] > 50 || $av['has_html']) { $has_useful = true; break; } }
+
+        if ($has_useful) {
+            $joomla_has_content++;
+            if (count($sample_elements) < 8) {
+                $sample_elements[] = [
+                    'wp_id' => $ep->ID, 'zoo_id' => $zoo_id, 'title' => $jrow['name'],
+                    'type' => $jrow['type'], 'state' => $jrow['state'],
+                    'has_known_uuid' => $has_known_uuid, 'element_keys' => $all_keys,
+                    'values' => $all_values,
+                    'raw_preview' => mb_substr($jrow['elements'], 0, 2000),
+                ];
+            }
+        } else {
+            $joomla_empty_too++;
+        }
+    }
+
+    echo "<div class='stat-grid'>";
+    echo "<div class='stat-box'><div class='number'>$no_joomla</div><div class='label'>No existe en Joomla</div></div>";
+    echo "<div class='stat-box'><div class='number'>$is_author</div><div class='label'>Son autores</div></div>";
+    echo "<div class='stat-box warn'><div class='number'>$joomla_empty_too</div><div class='label'>Joomla también vacío</div></div>";
+    echo "<div class='stat-box'><div class='number" . ($joomla_has_content > 0 ? "' style='color:#f85149'" : " ok'") . ">$joomla_has_content</div><div class='label'>Joomla SÍ tiene contenido</div></div>";
+    echo "</div></div>";
+
+    // UUID frequency
+    echo "<div class='card'><h2>UUIDs en los posts vacíos (frecuencia)</h2><div class='log'>";
+    arsort($uuid_analysis);
+    foreach ($uuid_analysis as $uuid => $count) {
+        $marker = ($uuid === $known_uuid) ? ' <span class="ok">← UUID CONOCIDO</span>' : '';
+        lm("  $uuid: $count veces$marker", 'info');
+    }
+    echo "</div></div>";
+
+    // Samples
+    if (!empty($sample_elements)) {
+        echo "<div class='card'><h2>Muestras: Joomla tiene contenido pero WP está vacío ($joomla_has_content)</h2>";
+        foreach ($sample_elements as $s) {
+            echo "<div style='border:1px solid #30363d;padding:10px;margin:8px 0;border-radius:6px'>";
+            echo "<p class='info'><strong>WP:{$s['wp_id']} | Zoo:{$s['zoo_id']} | {$s['title']}</strong></p>";
+            echo "<p>Tipo: {$s['type']} | Estado: {$s['state']} | UUID conocido: " .
+                ($s['has_known_uuid'] ? '<span class="ok">SÍ</span>' : '<span class="error">NO</span>') . "</p>";
+            echo "<p>UUIDs: <small class='warn'>" . implode(', ', array_map(function($k) use ($known_uuid) {
+                return ($k === $known_uuid) ? "<strong style='color:#7ee787'>$k</strong>" : substr($k, 0, 20) . '...';
+            }, $s['element_keys'])) . "</small></p>";
+            echo "<p>Valores:</p><pre style='font-size:12px'>";
+            foreach ($s['values'] as $v) {
+                echo "  len={$v['length']} html=" . ($v['has_html'] ? 'SÍ' : 'no') . " | {$v['preview']}\n";
+            }
+            echo "</pre>";
+            echo "<details><summary style='color:#58a6ff;cursor:pointer'>JSON raw (2000 chars)</summary><pre style='font-size:11px'>" .
+                htmlspecialchars($s['raw_preview']) . "</pre></details>";
+            echo "</div>";
+        }
+        echo "</div>";
+    }
+
+    // Global UUID analysis
+    echo "<div class='card'><h2>UUIDs más comunes en TODOS los artículos de Joomla (muestra 1000)</h2><div class='log'>";
+    $global_uuids = [];
+    $sample_r = $j->query("SELECT elements FROM jos_zoo_item WHERE type IN('article','page') AND LENGTH(elements)>10 LIMIT 1000");
+    $sample_count = 0;
+    while ($sr = $sample_r->fetch_assoc()) {
+        $sample_count++;
+        $el = json_decode($sr['elements'], true);
+        if ($el && is_array($el)) {
+            foreach (array_keys($el) as $k) {
+                if (!isset($global_uuids[$k])) $global_uuids[$k] = 0;
+                $global_uuids[$k]++;
+            }
+        }
+    }
+    arsort($global_uuids);
+    $i = 0;
+    foreach ($global_uuids as $uuid => $count) {
+        $marker = ($uuid === $known_uuid) ? ' <span class="ok">← UUID CONTENIDO</span>' : '';
+        $pct = round($count / $sample_count * 100, 1);
+        lm("  $uuid: $count/$sample_count ($pct%)$marker", 'info');
+        $i++; if ($i >= 30) break;
+    }
+    echo "</div></div>";
+
+    echo "<div class='card'>";
+    if ($joomla_has_content > 0) {
+        echo "<p class='error'>Hay $joomla_has_content posts donde Joomla tiene contenido pero no se extrajo correctamente.</p>";
+        echo "<p class='info'>Revisa los UUIDs arriba. Si hay un UUID diferente al conocido que contiene contenido, necesitamos agregarlo a extract_content().</p>";
+    } else {
+        echo "<p class='ok'>Todos los posts vacíos también están vacíos en Joomla. No hay contenido perdido.</p>";
+    }
+    echo "<a href='?action=audit' class='btn btn-blue'>Volver a Auditoría</a>";
+    echo "<a href='?action=recover' class='btn btn-green'>Re-ejecutar Recover</a>";
+    echo "</div>";
+    pf();
 }
 
 // ============================================================
@@ -798,5 +1134,6 @@ switch ($action) {
     case 'fix_base64':     do_fix_base64($offset, $batch); break;
     case 'import_missing': do_import_missing($offset, $batch); break;
     case 'fix_all':        do_fix_all($step, $offset, $batch); break;
+    case 'diagnose_empty': do_diagnose_empty(); break;
     default:               do_audit();
 }
