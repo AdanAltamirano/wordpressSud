@@ -446,6 +446,66 @@ function do_audit() {
 }
 
 // ============================================================
+// HELPER: FEATURED IMAGE
+// ============================================================
+function ensure_local_attachment($file_url, $post_id) {
+    global $wpdb;
+    $upload_dir = wp_upload_dir();
+    $base_url = $upload_dir['baseurl'];
+
+    // Check if URL is local (starts with uploads URL)
+    if (strpos($file_url, $base_url) === false) return false;
+
+    // Get path relative to uploads dir
+    $rel_path = str_replace($base_url . '/', '', $file_url);
+    $abs_path = $upload_dir['basedir'] . '/' . $rel_path;
+
+    // Fix Windows separators if mixed
+    $abs_path = str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $abs_path);
+
+    if (!file_exists($abs_path)) return false;
+
+    // Check if attachment exists by GUID
+    // NOTE: GUID matching is tricky if domain changed, but here we assume migration context
+    $attach_id = $wpdb->get_var($wpdb->prepare("SELECT ID FROM $wpdb->posts WHERE guid=%s", $file_url));
+    if ($attach_id) return $attach_id;
+
+    // Create attachment
+    $filetype = wp_check_filetype(basename($abs_path), null);
+    $attach_id = wp_insert_attachment([
+        'guid'           => $file_url,
+        'post_mime_type' => $filetype['type'],
+        'post_title'     => preg_replace('/\.[^.]+$/', '', basename($abs_path)),
+        'post_content'   => '',
+        'post_status'    => 'inherit'
+    ], $abs_path, $post_id);
+
+    if (!is_wp_error($attach_id)) {
+        require_once(ABSPATH . 'wp-admin/includes/image.php');
+        wp_update_attachment_metadata($attach_id, wp_generate_attachment_metadata($attach_id, $abs_path));
+        return $attach_id;
+    }
+    return false;
+}
+
+function set_featured_image_from_content($content, $post_id) {
+    // If already has thumbnail, skip
+    if (get_post_thumbnail_id($post_id)) return;
+
+    // Find first image
+    if (preg_match('/<img[^>]+src=["\']([^"\']+)["\']/i', $content, $matches)) {
+        $src = $matches[1];
+
+        // Try local attachment
+        $attach_id = ensure_local_attachment($src, $post_id);
+
+        if ($attach_id) {
+            set_post_thumbnail($post_id, $attach_id);
+        }
+    }
+}
+
+// ============================================================
 // SYNC — Importar/actualizar TODO
 // ============================================================
 function do_sync($offset, $batch) {
@@ -502,6 +562,15 @@ function do_sync($offset, $batch) {
 
         $wp_status = joomla_to_wp_status($row['state']);
 
+        // FIX DATES (clamp future dates to now)
+        if (strtotime($row['created']) > time()) {
+            $row['created'] = current_time('mysql');
+            if ($row['created_by'] == $row['modified_by']) $row['modified'] = $row['created'];
+        }
+        if (strtotime($row['modified']) > time()) {
+            $row['modified'] = current_time('mysql');
+        }
+
         // Cell tags
         $cell_tags = '';
         if ($result['b64_fixed'] > 0) $cell_tags .= " <span class='tag tag-b64'>{$result['b64_fixed']}b64</span>";
@@ -509,10 +578,26 @@ function do_sync($offset, $batch) {
 
         if ($exists_wp) {
             // Post exists — check ALL possible fixes needed
-            $wp_content = $wpdb->get_var($wpdb->prepare("SELECT post_content FROM $wpdb->posts WHERE ID=%d", $exists_wp));
+            $wp_post = $wpdb->get_row($wpdb->prepare("SELECT post_content, post_date FROM $wpdb->posts WHERE ID=%d", $exists_wp));
+            $wp_content = $wp_post->post_content;
             $current_len = strlen($wp_content);
             $needs_update = false;
+            $update_data = [];
             $actions = [];
+
+            // DATE FIX (specifically for future dates that prevent publishing)
+            if (abs(strtotime($wp_post->post_date) - strtotime($row['created'])) > 60) {
+                $update_data['post_date'] = $row['created'];
+                $update_data['post_date_gmt'] = get_gmt_from_date($row['created']);
+                $update_data['post_modified'] = $row['modified'];
+                $update_data['post_modified_gmt'] = get_gmt_from_date($row['modified']);
+                // Ensure published if date is valid
+                if ($wp_status === 'publish') {
+                    $update_data['post_status'] = 'publish';
+                }
+                $needs_update = true;
+                $actions[] = 'DATE-FIX';
+            }
 
             if ($current_len < 50 && $result['has_text']) {
                 $wp_content = $content;
@@ -547,7 +632,8 @@ function do_sync($offset, $batch) {
             }
 
             if ($needs_update) {
-                $wpdb->update($wpdb->posts, ['post_content' => $wp_content], ['ID' => $exists_wp]);
+                $update_data['post_content'] = $wp_content;
+                $wpdb->update($wpdb->posts, $update_data, ['ID' => $exists_wp]);
                 clean_post_cache($exists_wp);
                 $act_str = implode(' ', $actions);
                 // Grid cell — ACTUALIZADO
@@ -561,6 +647,9 @@ function do_sync($offset, $batch) {
                 // Grid cell — SIN CAMBIOS (skip silencioso, no mostrar celda)
                 $skipped++;
             }
+            // Always try to set featured image
+            set_featured_image_from_content($wp_content, $exists_wp);
+
         } else {
             // NEW POST — create
             $wp_author = 1;
@@ -594,6 +683,7 @@ function do_sync($offset, $batch) {
             }
 
             update_post_meta($wp_id, '_joomla_zoo_id', $zoo_id);
+            set_featured_image_from_content($content, $wp_id);
 
             // Categories
             $cq = $j->query("SELECT category_id FROM jos_zoo_category_item WHERE item_id=" . intval($zoo_id));
