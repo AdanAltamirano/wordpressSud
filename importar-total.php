@@ -352,6 +352,7 @@ function page_header($title) {
     echo "<a href='?action=verify' class='btn btn-gray'>Verificar 1:1</a>";
     echo "<a href='?action=diagnose' class='btn btn-red'>Diagnóstico</a>";
     echo "<a href='?action=fix_status' class='btn btn-yellow'>Fix Estado</a>";
+    echo "<a href='?action=reset_posts' class='btn btn-red' style='margin-left:12px;border:2px solid #f85149'>⚠ Reset Posts</a>";
     echo "</div>";
 }
 function pf() { echo "</div></body></html>"; }
@@ -618,7 +619,11 @@ function do_sync($offset, $batch) {
 
         $wp_status = joomla_to_wp_status($row['state']);
 
-        // FIX DATES (clamp future dates to now)
+        // Save original Joomla dates BEFORE clamping (used in DATE-FIX comparison below)
+        $joomla_original_created  = $row['created'];
+        $joomla_original_modified = $row['modified'];
+
+        // FIX DATES (clamp future dates to now so posts don't get 'scheduled')
         if (strtotime($row['created']) > time()) {
             $row['created'] = current_time('mysql');
             if ($row['created_by'] == $row['modified_by']) $row['modified'] = $row['created'];
@@ -641,11 +646,18 @@ function do_sync($offset, $batch) {
             $update_data = [];
             $actions = [];
 
-            // DATE FIX (specifically for future dates that prevent publishing)
-            if (abs(strtotime($wp_post->post_date) - strtotime($row['created'])) > 60) {
-                $update_data['post_date'] = $row['created'];
-                $update_data['post_date_gmt'] = get_gmt_from_date($row['created']);
-                $update_data['post_modified'] = $row['modified'];
+            // DATE FIX — only when WP is still 'scheduled' (future date), or when the
+            // Joomla date is a PAST date that genuinely changed vs what's stored in WP.
+            // If Joomla date is still in the future but WP already has a corrected past
+            // date, we leave it alone (avoids re-stamping the post date on every sync).
+            $wp_date_ts     = strtotime($wp_post->post_date);
+            $joomla_orig_ts = strtotime($joomla_original_created);
+            $needs_date_fix = ($wp_date_ts > time()) // WP post is still 'future'/scheduled
+                           || ($joomla_orig_ts <= time() && abs($wp_date_ts - $joomla_orig_ts) > 60); // past-date changed in Joomla
+            if ($needs_date_fix) {
+                $update_data['post_date']         = $row['created'];
+                $update_data['post_date_gmt']     = get_gmt_from_date($row['created']);
+                $update_data['post_modified']     = $row['modified'];
                 $update_data['post_modified_gmt'] = get_gmt_from_date($row['modified']);
                 // Ensure published if date is valid
                 if ($wp_status === 'publish') {
@@ -1188,6 +1200,140 @@ function do_fix_status() {
 }
 
 // ============================================================
+// RESET POSTS — Borra todos los posts importados de Joomla para reimportar limpio
+// NO borra: categorías, etiquetas, páginas, usuarios, opciones/tema, archivos de media.
+// ============================================================
+function do_reset_posts() {
+    global $wpdb;
+
+    $confirm         = isset($_GET['confirm'])         && $_GET['confirm']         === '1';
+    $include_orphans = isset($_GET['include_orphans']) && $_GET['include_orphans'] === '1';
+
+    page_header('Reset de Posts');
+
+    // ── Contar posts Joomla (tienen _joomla_zoo_id) ──────────────────────────
+    $zoo_posts = $wpdb->get_results(
+        "SELECT p.ID, p.post_title, p.post_status
+         FROM {$wpdb->posts} p
+         INNER JOIN {$wpdb->postmeta} pm ON pm.post_id = p.ID AND pm.meta_key = '_joomla_zoo_id'
+         WHERE p.post_type = 'post'"
+    );
+    $total_zoo = count($zoo_posts);
+
+    // ── Contar posts huérfanos (sin _joomla_zoo_id) ──────────────────────────
+    $orphan_posts = $wpdb->get_results(
+        "SELECT p.ID, p.post_title, p.post_status
+         FROM {$wpdb->posts} p
+         LEFT JOIN {$wpdb->postmeta} pm ON pm.post_id = p.ID AND pm.meta_key = '_joomla_zoo_id'
+         WHERE p.post_type = 'post'
+           AND pm.meta_value IS NULL
+           AND p.post_status NOT IN('trash','inherit')"
+    );
+    $total_orphan = count($orphan_posts);
+
+    // ── Pantalla de confirmación ──────────────────────────────────────────────
+    if (!$confirm) {
+        $total_to_del = $total_zoo + ($include_orphans ? $total_orphan : 0);
+        echo "<div class='card' style='border:2px solid #f85149'>";
+        echo "<h2 style='color:#f85149'>⚠️  Borrar posts y reimportar desde Joomla</h2>";
+        echo "<p>Esta acción eliminará los posts importados de WordPress para que puedas volver a
+              importar desde Joomla con un estado limpio.<br>
+              Los archivos de imagen, categorías, etiquetas, páginas, usuarios y
+              configuración del tema <strong style='color:#7ee787'>NO se tocarán</strong>.</p>";
+
+        echo "<div class='stat-grid'>";
+        echo "<div class='stat-box warn'><div class='number'>$total_zoo</div><div class='label'>Posts con ID Joomla</div></div>";
+        echo "<div class='stat-box " . ($total_orphan > 0 ? 'warn' : 'ok') . "'><div class='number'>$total_orphan</div><div class='label'>Posts huérfanos</div></div>";
+        echo "</div>";
+
+        echo "<p style='margin-top:12px'><strong>Opción 1 — Solo posts de Joomla</strong> (recomendado):<br>
+              Borra únicamente los $total_zoo posts que tienen <code>_joomla_zoo_id</code>.</p>";
+        echo "<a href='?action=reset_posts&confirm=1'
+                 class='btn btn-red'
+                 onclick=\"return confirm('¿Confirmar borrado de {$total_zoo} posts importados de Joomla?');\">
+              CONFIRMAR — Borrar {$total_zoo} posts Joomla</a>";
+
+        if ($total_orphan > 0) {
+            $total_all = $total_zoo + $total_orphan;
+            echo "<p style='margin-top:16px'><strong>Opción 2 — Todos los posts</strong> (posts Joomla + huérfanos):<br>
+                  Borra los $total_zoo posts de Joomla <em>más</em> los $total_orphan posts sin origen.</p>";
+            echo "<a href='?action=reset_posts&confirm=1&include_orphans=1'
+                     class='btn btn-red'
+                     onclick=\"return confirm('¿Confirmar borrado de {$total_all} posts (Joomla + huérfanos)?');\">
+                  CONFIRMAR — Borrar {$total_all} posts (todos)</a>";
+        }
+
+        echo " &nbsp;<a href='?action=audit' class='btn btn-gray'>Cancelar</a>";
+        echo "</div>";
+        pf();
+        return;
+    }
+
+    // ── Construir lista de IDs a borrar ──────────────────────────────────────
+    $post_ids = array_map(function($p) { return intval($p->ID); }, $zoo_posts);
+    if ($include_orphans) {
+        $orphan_ids = array_map(function($p) { return intval($p->ID); }, $orphan_posts);
+        $post_ids   = array_unique(array_merge($post_ids, $orphan_ids));
+    }
+
+    if (empty($post_ids)) {
+        lm("No hay posts para borrar.", 'info');
+        pf();
+        return;
+    }
+
+    echo "<div class='card'><h2>Borrando " . count($post_ids) . " posts...</h2><div class='log'>";
+
+    $deleted = 0;
+    foreach ($post_ids as $pid) {
+        // 1) Postmeta
+        $wpdb->delete($wpdb->postmeta,        ['post_id'  => $pid]);
+        // 2) Term relationships (categories/tags)
+        $wpdb->delete($wpdb->term_relationships, ['object_id' => $pid]);
+        // 3) Comments + commentmeta
+        $cids = $wpdb->get_col($wpdb->prepare(
+            "SELECT comment_ID FROM {$wpdb->comments} WHERE comment_post_ID = %d", $pid
+        ));
+        foreach ($cids as $cid) {
+            $wpdb->delete($wpdb->commentmeta, ['comment_id' => $cid]);
+            $wpdb->delete($wpdb->comments,    ['comment_ID' => $cid]);
+        }
+        // 4) The post itself
+        $wpdb->delete($wpdb->posts, ['ID' => $pid]);
+        clean_post_cache($pid);
+        $deleted++;
+        if ($deleted % 100 === 0) {
+            lm("  … $deleted borrados", 'info');
+            @ob_flush(); @flush();
+        }
+    }
+
+    // ── Recalcular conteos de términos ────────────────────────────────────────
+    $all_terms = $wpdb->get_col("SELECT DISTINCT tt.term_taxonomy_id FROM {$wpdb->term_taxonomy} tt");
+    if ($all_terms) {
+        wp_update_term_count_now($all_terms, 'category');
+        wp_update_term_count_now($all_terms, 'post_tag');
+    }
+
+    // Eliminar caché del mapa de categorías para que se reconstruya en el siguiente sync
+    delete_option('joomla_zoo_category_map');
+
+    echo "</div></div>";
+
+    echo "<div class='stat-grid'>";
+    echo "<div class='stat-box ok'><div class='number'>$deleted</div><div class='label'>Posts eliminados</div></div>";
+    echo "</div>";
+
+    echo "<div class='card'>";
+    echo "<p style='color:#7ee787;font-weight:bold;font-size:16px'>✓ Reset completo — $deleted posts eliminados.</p>";
+    echo "<p>Ahora ejecuta <strong>Sincronizar TODO</strong> para reimportar todos los artículos desde Joomla con estado limpio.</p>";
+    echo "<a href='?action=sync' class='btn btn-green'>Sincronizar TODO</a> &nbsp;";
+    echo "<a href='?action=audit' class='btn btn-blue'>Auditoría</a>";
+    echo "</div>";
+    pf();
+}
+
+// ============================================================
 // ROUTER
 // ============================================================
 switch ($action) {
@@ -1195,7 +1341,8 @@ switch ($action) {
     case 'sync':       do_sync($offset, $batch); break;
     case 'fix_base64': do_fix_base64($offset, $batch); break;
     case 'verify':     do_verify(); break;
-    case 'diagnose':   do_diagnose(); break;
-    case 'fix_status': do_fix_status(); break;
-    default:           do_audit();
+    case 'diagnose':    do_diagnose(); break;
+    case 'fix_status':  do_fix_status(); break;
+    case 'reset_posts': do_reset_posts(); break;
+    default:            do_audit();
 }
