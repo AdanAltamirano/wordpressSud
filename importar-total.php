@@ -35,6 +35,7 @@ define('J_USER', 'root'); define('J_PASS', 'yue02'); define('J_DB', 'sudcaliforn
 define('UPLOADS_DIR', ABSPATH . 'wp-content/uploads');
 define('UPLOADS_URL', site_url('/wp-content/uploads'));
 define('JIMAGES_DIR', UPLOADS_DIR . '/joomla-images');
+define('JOOMLA_SRC_IMAGES', 'C:/Sudcalifornios/images'); // Directorio images/ del sitio Joomla original
 
 // Known content UUID
 define('CONTENT_UUID', '2e3c9e69-1f9e-4647-8d13-4e88094d2790');
@@ -227,19 +228,30 @@ function fix_base64_images($html, $post_id = 0) {
 // ============================================================
 // FIX src="images/..." URLS
 // ============================================================
-function fix_image_urls($html) {
+function fix_image_urls($html, $post_id = 0) {
     $index = build_file_index();
     $count = 0;
     $not_found = [];
     $html = preg_replace_callback(
         '/src=["\'](?:\.\/)?images\/([^"\']+)["\']/i',
-        function($m) use ($index, &$count, &$not_found) {
-            $fname = strtolower(basename(urldecode($m[1])));
+        function($m) use ($index, $post_id, &$count, &$not_found) {
+            $rel  = urldecode($m[1]);
+            $fname = strtolower(basename($rel));
+
+            // 1) Check joomla-images index (already migrated files)
             if (isset($index[$fname])) {
                 $count++;
                 return 'src="' . UPLOADS_URL . '/' . $index[$fname] . '"';
             }
-            $not_found[] = urldecode($m[1]);
+
+            // 2) Fallback: import directly from Joomla source images directory
+            $result = import_joomla_src_image($rel, $post_id);
+            if ($result) {
+                $count++;
+                return 'src="' . $result['url'] . '"';
+            }
+
+            $not_found[] = $rel;
             return $m[0];
         },
         $html
@@ -257,8 +269,8 @@ function process_content($elements_json, $post_id = 0) {
     $b64_result = fix_base64_images($content, $post_id);
     $content = $b64_result['html'];
 
-    // 2) Fix image URLs
-    $img_result = fix_image_urls($content);
+    // 2) Fix image URLs (with post_id for Joomla source fallback)
+    $img_result = fix_image_urls($content, $post_id);
     $content = $img_result['html'];
 
     return [
@@ -338,6 +350,8 @@ function page_header($title) {
     echo "<a href='?action=sync' class='btn btn-green'>Sincronizar TODO</a>";
     echo "<a href='?action=fix_base64' class='btn btn-yellow'>Fix Base64</a>";
     echo "<a href='?action=verify' class='btn btn-gray'>Verificar 1:1</a>";
+    echo "<a href='?action=diagnose' class='btn btn-red'>Diagnóstico</a>";
+    echo "<a href='?action=fix_status' class='btn btn-yellow'>Fix Estado</a>";
     echo "</div>";
 }
 function pf() { echo "</div></body></html>"; }
@@ -446,6 +460,41 @@ function do_audit() {
 }
 
 // ============================================================
+// IMPORT IMAGE FROM JOOMLA SOURCE (images/... → WP uploads)
+// ============================================================
+function import_joomla_src_image($rel_img_path, $post_id = 0) {
+    // rel_img_path is like "1/isipd/ISIPD2/v/foto.jpg"
+    $rel_img_path = ltrim(str_replace('\\', '/', $rel_img_path), '/');
+    $src_path = str_replace('/', DIRECTORY_SEPARATOR, JOOMLA_SRC_IMAGES . '/' . $rel_img_path);
+
+    if (!file_exists($src_path)) return false;
+
+    $upload_dir = wp_upload_dir();
+    $basename   = basename($src_path);
+    $filename   = wp_unique_filename($upload_dir['path'], $basename);
+    $dest_path  = $upload_dir['path'] . '/' . $filename;
+
+    if (!copy($src_path, $dest_path)) return false;
+
+    $filetype  = wp_check_filetype($filename, null);
+    $attach_id = wp_insert_attachment([
+        'guid'           => $upload_dir['url'] . '/' . $filename,
+        'post_mime_type' => $filetype['type'],
+        'post_title'     => pathinfo($filename, PATHINFO_FILENAME),
+        'post_content'   => '',
+        'post_status'    => 'inherit'
+    ], $dest_path, $post_id);
+
+    if (is_wp_error($attach_id)) {
+        @unlink($dest_path);
+        return false;
+    }
+
+    wp_update_attachment_metadata($attach_id, wp_generate_attachment_metadata($attach_id, $dest_path));
+    return ['url' => $upload_dir['url'] . '/' . $filename, 'id' => $attach_id];
+}
+
+// ============================================================
 // HELPER: FEATURED IMAGE
 // ============================================================
 function ensure_local_attachment($file_url, $post_id) {
@@ -493,15 +542,22 @@ function set_featured_image_from_content($content, $post_id) {
     if (get_post_thumbnail_id($post_id)) return;
 
     // Find first image
-    if (preg_match('/<img[^>]+src=["\']([^"\']+)["\']/i', $content, $matches)) {
-        $src = $matches[1];
+    if (!preg_match('/<img[^>]+src=["\']([^"\']+)["\']/i', $content, $matches)) return;
 
-        // Try local attachment
-        $attach_id = ensure_local_attachment($src, $post_id);
+    $src = $matches[1];
+    $attach_id = false;
 
-        if ($attach_id) {
-            set_post_thumbnail($post_id, $attach_id);
-        }
+    // Case 1: fully resolved local WP URL → look up or register attachment
+    $attach_id = ensure_local_attachment($src, $post_id);
+
+    // Case 2: still an unresolved Joomla images/... path → import from Joomla source
+    if (!$attach_id && preg_match('/^(?:\.\/)?images\/(.+)/i', $src, $rel_m)) {
+        $result = import_joomla_src_image($rel_m[1], $post_id);
+        if ($result) $attach_id = $result['id'];
+    }
+
+    if ($attach_id) {
+        set_post_thumbnail($post_id, $attach_id);
     }
 }
 
@@ -578,7 +634,7 @@ function do_sync($offset, $batch) {
 
         if ($exists_wp) {
             // Post exists — check ALL possible fixes needed
-            $wp_post = $wpdb->get_row($wpdb->prepare("SELECT post_content, post_date FROM $wpdb->posts WHERE ID=%d", $exists_wp));
+            $wp_post = $wpdb->get_row($wpdb->prepare("SELECT post_content, post_date, post_status FROM $wpdb->posts WHERE ID=%d", $exists_wp));
             $wp_content = $wp_post->post_content;
             $current_len = strlen($wp_content);
             $needs_update = false;
@@ -621,7 +677,7 @@ function do_sync($offset, $batch) {
                     }
                 }
                 if (strpos($wp_content, 'src="images/') !== false || strpos($wp_content, "src='images/") !== false) {
-                    $img_fix = fix_image_urls($wp_content);
+                    $img_fix = fix_image_urls($wp_content, $exists_wp);
                     if ($img_fix['fixed'] > 0) {
                         $wp_content = $img_fix['html'];
                         $img_total += $img_fix['fixed'];
@@ -629,6 +685,13 @@ function do_sync($offset, $batch) {
                         $actions[] = "{$img_fix['fixed']}img";
                     }
                 }
+            }
+
+            // STATUS SYNC — always reflect Joomla state in WP post_status
+            if ($wp_post->post_status !== $wp_status) {
+                $update_data['post_status'] = $wp_status;
+                $needs_update = true;
+                $actions[] = 'STS→' . ($wp_status === 'publish' ? 'PUB' : ($wp_status === 'draft' ? 'DFT' : strtoupper($wp_status)));
             }
 
             if ($needs_update) {
@@ -951,12 +1014,188 @@ function do_verify() {
 }
 
 // ============================================================
+// DIAGNOSE — Detectar posts publicados incorrectamente
+// ============================================================
+function do_diagnose() {
+    global $wpdb;
+    page_header('Diagnóstico de Estado');
+    $j = jdb();
+
+    // 1) Posts huérfanos en WP (publicados o draft, sin ID de Joomla)
+    $orphans = $wpdb->get_results("
+        SELECT p.ID, p.post_title, p.post_status, p.post_date
+        FROM $wpdb->posts p
+        LEFT JOIN $wpdb->postmeta pm ON p.ID = pm.post_id AND pm.meta_key = '_joomla_zoo_id'
+        WHERE p.post_type = 'post'
+          AND p.post_status NOT IN('trash','inherit','auto-draft')
+          AND pm.meta_value IS NULL
+        ORDER BY p.post_date DESC
+    ");
+
+    // 2) Estado incorrecto: WP vs Joomla
+    $mismatch = [];
+    $ghost    = []; // En WP pero no existe en Joomla
+
+    $imported = $wpdb->get_results("
+        SELECT p.ID, p.post_title, p.post_status, pm.meta_value as zoo_id
+        FROM $wpdb->posts p
+        JOIN $wpdb->postmeta pm ON p.ID = pm.post_id AND pm.meta_key = '_joomla_zoo_id'
+        WHERE p.post_type = 'post' AND p.post_status NOT IN('trash','inherit')
+    ");
+
+    $jdb = jdb();
+    foreach ($imported as $wp_p) {
+        $zoo_id = intval($wp_p->zoo_id);
+        $jrow = $jdb->query("SELECT state FROM jos_zoo_item WHERE id = $zoo_id LIMIT 1");
+        $jdata = $jrow ? $jrow->fetch_assoc() : null;
+        if (!$jdata) {
+            $ghost[] = $wp_p;
+            continue;
+        }
+        $expected = joomla_to_wp_status($jdata['state']);
+        if ($wp_p->post_status !== $expected) {
+            $mismatch[] = [
+                'wp'       => $wp_p,
+                'j_state'  => $jdata['state'],
+                'expected' => $expected,
+            ];
+        }
+    }
+
+    // Stats
+    $orphan_pub = count(array_filter($orphans, fn($o) => $o->post_status === 'publish'));
+    echo "<div class='stat-grid'>";
+    echo "<div class='stat-box" . (count($orphans) > 0 ? '' : ' ok') . "'><div class='number'>" . count($orphans) . "</div><div class='label'>Huérfanos WP<br><small style='font-size:10px'>($orphan_pub publicados)</small></div></div>";
+    echo "<div class='stat-box" . (count($mismatch) > 0 ? '' : ' ok') . "'><div class='number'>" . count($mismatch) . "</div><div class='label'>Estado incorrecto</div></div>";
+    echo "<div class='stat-box" . (count($ghost) > 0 ? '' : ' ok') . "'><div class='number'>" . count($ghost) . "</div><div class='label'>En WP, NO en Joomla</div></div>";
+    echo "</div>";
+
+    // HUÉRFANOS (sin ID de Joomla)
+    if (count($orphans) > 0) {
+        echo "<div class='card'><h2 style='color:#f85149'>Posts huérfanos en WP — sin ID de Joomla (" . count($orphans) . ")</h2>";
+        echo "<p style='color:#8b949e'>Estos posts existen en WordPress pero NO provienen de Joomla. Pueden ser posts de prueba, el post de muestra de WP, o posts creados antes de la migración. <strong style='color:#f85149'>Si están publicados y no deberían estar, usa Fix Estado o elimínalos manualmente.</strong></p>";
+        echo "<div class='article-grid'>";
+        foreach ($orphans as $o) {
+            $st_c = $o->post_status === 'publish' ? 'tag-pub' : 'tag-draft';
+            echo "<div class='article-cell status-error'>";
+            echo "<div class='cell-id'>WP:{$o->ID}</div>";
+            echo "<div class='cell-title' title='" . htmlspecialchars($o->post_title) . "'>" . htmlspecialchars(mb_substr($o->post_title, 0, 55)) . "</div>";
+            echo "<div class='cell-meta'><span class='tag $st_c'>" . strtoupper($o->post_status) . "</span> <span style='color:#8b949e'>" . substr($o->post_date, 0, 10) . "</span></div>";
+            echo "</div>";
+        }
+        echo "</div></div>";
+    }
+
+    // GHOST (importados pero ya no existen en Joomla)
+    if (count($ghost) > 0) {
+        echo "<div class='card'><h2 style='color:#f85149'>Posts importados pero ya NO existen en Joomla (" . count($ghost) . ")</h2>";
+        echo "<div class='article-grid'>";
+        foreach ($ghost as $g) {
+            $st_c = $g->post_status === 'publish' ? 'tag-pub' : 'tag-draft';
+            echo "<div class='article-cell status-error'>";
+            echo "<div class='cell-id'>WP:{$g->ID} ← Zoo:{$g->zoo_id}</div>";
+            echo "<div class='cell-title'>" . htmlspecialchars(mb_substr($g->post_title, 0, 50)) . "</div>";
+            echo "<div class='cell-meta'><span class='tag $st_c'>" . strtoupper($g->post_status) . "</span></div>";
+            echo "</div>";
+        }
+        echo "</div></div>";
+    }
+
+    // MISMATCH (estado incorrecto)
+    if (count($mismatch) > 0) {
+        $pub_wrong = count(array_filter($mismatch, fn($m) => $m['wp']->post_status === 'publish' && $m['expected'] !== 'publish'));
+        echo "<div class='card'><h2 style='color:#d29922'>Estado incorrecto en WP — " . count($mismatch) . " posts ($pub_wrong publicados que deberían ser draft/pending)</h2>";
+        echo "<div class='article-grid'>";
+        foreach ($mismatch as $m) {
+            $from_c = $m['wp']->post_status === 'publish' ? 'tag-pub' : 'tag-draft';
+            $to_c   = $m['expected'] === 'publish' ? 'tag-pub' : 'tag-draft';
+            echo "<div class='article-cell status-warn'>";
+            echo "<div class='cell-id'>WP:{$m['wp']->ID} ← Zoo:{$m['wp']->zoo_id}</div>";
+            echo "<div class='cell-title'>" . htmlspecialchars(mb_substr($m['wp']->post_title, 0, 45)) . "</div>";
+            echo "<div class='cell-meta'>";
+            echo "<span class='tag $from_c'>" . strtoupper($m['wp']->post_status) . "</span>";
+            echo " → <span class='tag $to_c'>" . strtoupper($m['expected']) . "</span>";
+            echo " <span style='color:#8b949e'>J.state=" . $m['j_state'] . "</span>";
+            echo "</div></div>";
+        }
+        echo "</div>";
+        echo "<p style='margin-top:12px'><a href='?action=fix_status' class='btn btn-yellow' style='font-size:15px;padding:12px 24px'>CORREGIR ESTADOS (" . count($mismatch) . " posts)</a></p>";
+        echo "</div>";
+    }
+
+    if (count($orphans) === 0 && count($mismatch) === 0 && count($ghost) === 0) {
+        echo "<div class='card' style='border-color:#238636'><p style='color:#7ee787;font-size:18px;font-weight:bold'>Todo OK — No se detectaron problemas de estado.</p></div>";
+    }
+
+    pf();
+}
+
+// ============================================================
+// FIX STATUS — Sincronizar estados Joomla → WordPress
+// ============================================================
+function do_fix_status() {
+    global $wpdb;
+    page_header('Corregir Estados');
+    $jdb = jdb();
+
+    $imported = $wpdb->get_results("
+        SELECT p.ID, p.post_title, p.post_status, pm.meta_value as zoo_id
+        FROM $wpdb->posts p
+        JOIN $wpdb->postmeta pm ON p.ID = pm.post_id AND pm.meta_key = '_joomla_zoo_id'
+        WHERE p.post_type = 'post' AND p.post_status NOT IN('trash','inherit')
+        ORDER BY p.ID ASC
+    ");
+
+    $total = count($imported);
+    echo "<div class='card'><h2>Corrigiendo estados ($total posts importados)</h2><div class='log'>";
+
+    $fixed = 0; $ok_count = 0; $ghost = 0;
+
+    foreach ($imported as $wp_p) {
+        $zoo_id = intval($wp_p->zoo_id);
+        $jrow = $jdb->query("SELECT state FROM jos_zoo_item WHERE id = $zoo_id LIMIT 1");
+        $jdata = $jrow ? $jrow->fetch_assoc() : null;
+        if (!$jdata) {
+            lm("AVISO Zoo:$zoo_id NO encontrado en Joomla (WP:{$wp_p->ID} '{$wp_p->post_title}')", 'warn');
+            $ghost++;
+            continue;
+        }
+        $expected = joomla_to_wp_status($jdata['state']);
+        if ($wp_p->post_status !== $expected) {
+            $wpdb->update($wpdb->posts, ['post_status' => $expected], ['ID' => $wp_p->ID]);
+            clean_post_cache($wp_p->ID);
+            lm("FIXED WP:{$wp_p->ID} [{$wp_p->post_status}→$expected] Zoo:$zoo_id | " . htmlspecialchars(mb_substr($wp_p->post_title, 0, 60)), 'success');
+            $fixed++;
+        } else {
+            $ok_count++;
+        }
+        @ob_flush(); @flush();
+    }
+
+    echo "</div></div>";
+
+    echo "<div class='stat-grid'>";
+    echo "<div class='stat-box ok'><div class='number'>$fixed</div><div class='label'>Corregidos</div></div>";
+    echo "<div class='stat-box ok'><div class='number'>$ok_count</div><div class='label'>Ya correctos</div></div>";
+    echo "<div class='stat-box" . ($ghost > 0 ? ' warn' : ' ok') . "'><div class='number'>$ghost</div><div class='label'>No en Joomla</div></div>";
+    echo "</div>";
+
+    echo "<div class='card'>";
+    echo "<p style='color:#7ee787;font-weight:bold;font-size:16px'>Estados sincronizados. $fixed posts corregidos.</p>";
+    echo "<a href='?action=diagnose' class='btn btn-blue'>Ver Diagnóstico</a> <a href='?action=audit' class='btn btn-gray'>Auditoría</a>";
+    echo "</div>";
+    pf();
+}
+
+// ============================================================
 // ROUTER
 // ============================================================
 switch ($action) {
-    case 'audit':     do_audit(); break;
-    case 'sync':      do_sync($offset, $batch); break;
+    case 'audit':      do_audit(); break;
+    case 'sync':       do_sync($offset, $batch); break;
     case 'fix_base64': do_fix_base64($offset, $batch); break;
-    case 'verify':    do_verify(); break;
-    default:          do_audit();
+    case 'verify':     do_verify(); break;
+    case 'diagnose':   do_diagnose(); break;
+    case 'fix_status': do_fix_status(); break;
+    default:           do_audit();
 }
