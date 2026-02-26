@@ -1058,14 +1058,17 @@ function do_diagnose() {
     $jdb = jdb();
     foreach ($imported as $wp_p) {
         $zoo_id = intval($wp_p->zoo_id);
-        $jrow = $jdb->query("SELECT state FROM jos_zoo_item WHERE id = $zoo_id LIMIT 1");
+        $jrow = $jdb->query("SELECT state, created FROM jos_zoo_item WHERE id = $zoo_id LIMIT 1");
         $jdata = $jrow ? $jrow->fetch_assoc() : null;
         if (!$jdata) {
             $ghost[] = $wp_p;
             continue;
         }
-        $expected = joomla_to_wp_status($jdata['state']);
-        if ($wp_p->post_status !== $expected) {
+        $expected = joomla_to_wp_status_with_date($jdata['state'], $jdata['created']);
+        // 'future' in WP is valid when Joomla state=1 and date is in the future
+        $status_ok = ($wp_p->post_status === $expected)
+                  || ($expected === 'publish' && $wp_p->post_status === 'future');
+        if (!$status_ok) {
             $mismatch[] = [
                 'wp'       => $wp_p,
                 'j_state'  => $jdata['state'],
@@ -1165,15 +1168,18 @@ function do_fix_status() {
 
     foreach ($imported as $wp_p) {
         $zoo_id = intval($wp_p->zoo_id);
-        $jrow = $jdb->query("SELECT state FROM jos_zoo_item WHERE id = $zoo_id LIMIT 1");
+        $jrow = $jdb->query("SELECT state, created FROM jos_zoo_item WHERE id = $zoo_id LIMIT 1");
         $jdata = $jrow ? $jrow->fetch_assoc() : null;
         if (!$jdata) {
             lm("AVISO Zoo:$zoo_id NO encontrado en Joomla (WP:{$wp_p->ID} '{$wp_p->post_title}')", 'warn');
             $ghost++;
             continue;
         }
-        $expected = joomla_to_wp_status($jdata['state']);
-        if ($wp_p->post_status !== $expected) {
+        $expected = joomla_to_wp_status_with_date($jdata['state'], $jdata['created']);
+        // 'future' in WP is valid when Joomla state=1 and date is in the future
+        $status_ok = ($wp_p->post_status === $expected)
+                  || ($expected === 'publish' && $wp_p->post_status === 'future');
+        if (!$status_ok) {
             $wpdb->update($wpdb->posts, ['post_status' => $expected], ['ID' => $wp_p->ID]);
             clean_post_cache($wp_p->ID);
             lm("FIXED WP:{$wp_p->ID} [{$wp_p->post_status}→$expected] Zoo:$zoo_id | " . htmlspecialchars(mb_substr($wp_p->post_title, 0, 60)), 'success');
