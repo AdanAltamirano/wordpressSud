@@ -30,8 +30,17 @@ require_once(ABSPATH . 'wp-admin/includes/image.php');
 require_once(ABSPATH . 'wp-admin/includes/file.php');
 require_once(ABSPATH . 'wp-admin/includes/media.php');
 
-define('J_HOST', '127.0.0.1'); define('J_PORT', 3306);
-define('J_USER', 'root'); define('J_PASS', 'yue02'); define('J_DB', 'sudcalifornios');
+// Use credentials from migration-config.php if available
+if (file_exists(__DIR__ . '/migration-config.php')) {
+    require_once(__DIR__ . '/migration-config.php');
+    if (!defined('J_HOST')) define('J_HOST', defined('JOOMLA_DB_HOST') ? JOOMLA_DB_HOST : '127.0.0.1');
+    if (!defined('J_PORT')) define('J_PORT', defined('JOOMLA_DB_PORT') ? JOOMLA_DB_PORT : 3306);
+    if (!defined('J_USER')) define('J_USER', defined('JOOMLA_DB_USER') ? JOOMLA_DB_USER : 'root');
+    if (!defined('J_PASS')) define('J_PASS', defined('JOOMLA_DB_PASS') ? JOOMLA_DB_PASS : '');
+    if (!defined('J_DB'))   define('J_DB',   defined('JOOMLA_DB_NAME') ? JOOMLA_DB_NAME : 'sudcalifornios');
+} else {
+    die("Error: migration-config.php not found. Please create it from migration-config.sample.php");
+}
 define('UPLOADS_DIR', ABSPATH . 'wp-content/uploads');
 define('UPLOADS_URL', site_url('/wp-content/uploads'));
 define('JIMAGES_DIR', UPLOADS_DIR . '/joomla-images');
@@ -622,41 +631,41 @@ function do_fix_featured_images($offset, $batch) {
     global $wpdb;
     page_header('Fix Featured Images');
 
-    // Optimization: Increase batch size significantly since we are filtering by SQL
-    if ($batch < 500) $batch = 500;
+    // Force batch size to 500 for speed
+    $batch = 500;
 
-    // Count TOTAL posts needing fix (where _thumbnail_id IS NULL)
-    // Note: This query is a bit expensive but accurate for the progress bar
+    // Count TOTAL posts needing fix (where _thumbnail_id IS NULL OR empty)
     $total_needing_fix = $wpdb->get_var("
         SELECT COUNT(p.ID)
         FROM $wpdb->posts p
         LEFT JOIN $wpdb->postmeta pm ON p.ID = pm.post_id AND pm.meta_key = '_thumbnail_id'
         WHERE p.post_type='post'
           AND p.post_status NOT IN('trash','inherit')
-          AND pm.meta_value IS NULL
+          AND (pm.meta_value IS NULL OR pm.meta_value = '')
     ");
 
-    // Get batch of CANDIDATE posts (only those without thumbnail)
+    // Get batch of CANDIDATE posts
+    // We use $offset here to skip items we already checked in previous passes but couldn't fix
     $posts = $wpdb->get_results($wpdb->prepare("
         SELECT p.ID, p.post_title, p.post_content
         FROM $wpdb->posts p
         LEFT JOIN $wpdb->postmeta pm ON p.ID = pm.post_id AND pm.meta_key = '_thumbnail_id'
         WHERE p.post_type='post'
           AND p.post_status NOT IN('trash','inherit')
-          AND pm.meta_value IS NULL
+          AND (pm.meta_value IS NULL OR pm.meta_value = '')
         ORDER BY p.ID DESC
         LIMIT %d, %d
-    ", 0, $batch)); // Always offset 0 because we are shrinking the queue
+    ", $offset, $batch));
 
     echo "<div class='card'><h2>Fix Featured Images</h2>";
-    echo "<p>Total pendiente de reparar: <strong>$total_needing_fix</strong> posts. Procesando lote de $batch.</p>";
+    echo "<p>Total pendiente de reparar: <strong>$total_needing_fix</strong> posts. Procesando lote de $batch (Offset: $offset).</p>";
     echo "<div class='log'>";
 
     $fixed = 0;
     $skipped = 0;
 
     foreach ($posts as $post) {
-        // Double check in case of race condition or cache
+        // Double check PHP-side
         if (get_post_thumbnail_id($post->ID)) {
             $skipped++;
             continue;
@@ -664,9 +673,6 @@ function do_fix_featured_images($offset, $batch) {
 
         if (strpos($post->post_content, '<img') === false) {
             $skipped++;
-            // We can't fix this one, but it will keep showing up in the query.
-            // Ideally we should mark it as "checked" to avoid loops, but for simple migration
-            // we will just rely on the fact that if we fix some, the count decreases.
             continue;
         }
 
@@ -689,25 +695,30 @@ function do_fix_featured_images($offset, $batch) {
     echo "<div class='stat-box warn'><div class='number'>" . ($total_needing_fix - $fixed) . "</div><div class='label'>Restantes aprox</div></div>";
     echo "</div>";
 
-    // Progress logic: If we fixed something, we reload to get the next batch.
-    // If we processed items but fixed 0, we might be stuck in a loop of "posts without images",
-    // so we should stop or offset?
-    // Current strategy: If $fixed > 0, we are making progress.
-    // If $fixed == 0 and count($posts) > 0, we are just iterating through unfixable posts.
+    // Logic for next batch:
+    // We query with LIMIT $offset, $batch.
+    // If we fix items, they are removed from the "candidate pool" (because they now have a thumbnail).
+    // If we skip items, they remain in the pool.
+    // So, the next offset should be: Current Offset + Items Skipped.
+    // Example: Batch 100. Fixed 20. Skipped 80.
+    // The 20 fixed are gone. The 80 skipped are still at the "top" of the list (conceptually).
+    // So to see NEW items, we must skip the 80 we just saw.
+    // Next Offset = Current Offset + Skipped.
 
-    if ($fixed > 0 && ($total_needing_fix - $fixed) > 0) {
-        // Continue (keep offset 0 because we removed items from the "queue" by fixing them)
-        $url = "?action=fix_featured&offset=0&batch=$batch";
+    $processed_count = count($posts);
+
+    if ($processed_count > 0) {
+        $next_offset = $offset + $skipped;
+
+        // Safety check: if we processed items but made 0 progress (fixed=0) and offset is not increasing (skipped=0?),
+        // preventing infinite loops. (If skipped=processed_count, next_offset increases correctly).
+
+        $url = "?action=fix_featured&offset=$next_offset&batch=$batch";
         echo "<script>setTimeout(function(){window.location.href='$url';},1000);</script>";
         echo "<a href='$url' class='btn btn-blue'>Siguiente lote</a> <a href='?action=audit' class='btn btn-gray'>Detener</a>";
-    } elseif (count($posts) < $batch && $fixed == 0) {
-         echo "<p style='color:#7ee787;font-weight:bold'>Proceso completado (o no hay más imágenes recuperables).</p>";
-         echo "<a href='?action=audit' class='btn btn-blue'>Auditoría</a>";
     } else {
-        // We might be hitting a block of unfixable posts.
-        // In a real queue we'd flag them. Here, user can stop.
-        echo "<p style='color:#d29922'>No se repararon imágenes en este lote (posiblemente no tienen &lt;img&gt; en el contenido).</p>";
-        echo "<a href='?action=fix_featured&offset=0&batch=$batch' class='btn btn-blue'>Intentar más</a> <a href='?action=audit' class='btn btn-gray'>Detener</a>";
+        echo "<p style='color:#7ee787;font-weight:bold'>Proceso completado.</p>";
+        echo "<a href='?action=audit' class='btn btn-blue'>Auditoría</a>";
     }
     echo "</div>";
     pf();
