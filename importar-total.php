@@ -399,6 +399,7 @@ function page_header($title) {
     echo "<a href='?action=audit' class='btn btn-blue'>Auditoría</a>";
     echo "<a href='?action=sync' class='btn btn-green'>Sincronizar TODO</a>";
     echo "<a href='?action=fix_base64' class='btn btn-yellow'>Fix Base64</a>";
+    echo "<a href='?action=fix_featured' class='btn btn-yellow'>Fix Featured Img</a>";
     echo "<a href='?action=verify' class='btn btn-gray'>Verificar 1:1</a>";
     echo "<a href='?action=diagnose' class='btn btn-red'>Diagnóstico</a>";
     echo "<a href='?action=fix_status' class='btn btn-yellow'>Fix Estado</a>";
@@ -611,6 +612,78 @@ function set_featured_image_from_content($content, $post_id) {
     if ($attach_id) {
         set_post_thumbnail($post_id, $attach_id);
     }
+}
+
+// ============================================================
+// FIX FEATURED IMAGES — Asigna imagen destacada si falta
+// ============================================================
+function do_fix_featured_images($offset, $batch) {
+    global $wpdb;
+    page_header('Fix Featured Images');
+
+    // Count total posts
+    $total_posts = $wpdb->get_var("SELECT COUNT(*) FROM $wpdb->posts WHERE post_type='post' AND post_status NOT IN('trash','inherit')");
+
+    // Get batch of posts
+    $posts = $wpdb->get_results($wpdb->prepare("
+        SELECT ID, post_title, post_content
+        FROM $wpdb->posts
+        WHERE post_type='post' AND post_status NOT IN('trash','inherit')
+        ORDER BY ID DESC
+        LIMIT %d, %d
+    ", $offset, $batch));
+
+    echo "<div class='card'><h2>Fix Featured Images (lote $offset - " . ($offset + count($posts)) . " de $total_posts)</h2><div class='log'>";
+
+    $fixed = 0;
+    $skipped = 0;
+    $already_ok = 0;
+
+    foreach ($posts as $post) {
+        if (get_post_thumbnail_id($post->ID)) {
+            $already_ok++;
+            continue;
+        }
+
+        if (strpos($post->post_content, '<img') === false) {
+            $skipped++;
+            continue;
+        }
+
+        set_featured_image_from_content($post->post_content, $post->ID);
+        $new_thumb = get_post_thumbnail_id($post->ID);
+
+        if ($new_thumb) {
+             lm("FIXED WP:{$post->ID} set featured img: $new_thumb | " . htmlspecialchars(mb_substr($post->post_title, 0, 60)), 'success');
+             $fixed++;
+        } else {
+             $skipped++;
+        }
+    }
+
+    echo "</div></div>";
+
+    echo "<div class='stat-grid'>";
+    echo "<div class='stat-box ok'><div class='number'>$fixed</div><div class='label'>Asignadas ahora</div></div>";
+    echo "<div class='stat-box ok'><div class='number'>$already_ok</div><div class='label'>Ya tenían img</div></div>";
+    echo "<div class='stat-box'><div class='number'>$skipped</div><div class='label'>Sin img válida</div></div>";
+    echo "</div>";
+
+    $processed = $offset + count($posts);
+    $pct = $total_posts > 0 ? min(100, round(($processed / $total_posts) * 100)) : 100;
+    echo "<div class='card'><div class='progress'><div class='fill' style='width:{$pct}%'>$pct% ($processed / $total_posts)</div></div>";
+
+    if (count($posts) >= $batch && $processed < $total_posts) {
+        $next = $offset + $batch;
+        $url = "?action=fix_featured&offset=$next&batch=$batch";
+        echo "<script>setTimeout(function(){window.location.href='$url';},1000);</script>";
+        echo "<a href='$url' class='btn btn-blue'>Siguiente lote</a> <a href='?action=audit' class='btn btn-gray'>Detener</a>";
+    } else {
+        echo "<p style='color:#7ee787;font-weight:bold'>Proceso completado.</p>";
+        echo "<a href='?action=audit' class='btn btn-blue'>Auditoría</a>";
+    }
+    echo "</div>";
+    pf();
 }
 
 // ============================================================
@@ -1459,6 +1532,7 @@ switch ($action) {
     case 'audit':       do_audit(); break;
     case 'sync':        do_sync($offset, $batch); break;
     case 'fix_base64':  do_fix_base64($offset, $batch); break;
+    case 'fix_featured': do_fix_featured_images($offset, $batch); break;
     case 'verify':      do_verify(); break;
     case 'diagnose':    do_diagnose(); break;
     case 'fix_status':  do_fix_status(); break;
