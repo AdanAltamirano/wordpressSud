@@ -1394,7 +1394,6 @@ function do_reset_posts() {
 // ============================================================
 function do_fix_authors() {
     global $wpdb;
-    ph();
     page_header('Fix Autores');
 
     $author_map = build_author_map();
