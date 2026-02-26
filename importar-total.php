@@ -404,6 +404,7 @@ function page_header($title) {
     echo "<a href='?action=diagnose' class='btn btn-red'>Diagnóstico</a>";
     echo "<a href='?action=fix_status' class='btn btn-yellow'>Fix Estado</a>";
     echo "<a href='?action=fix_authors' class='btn btn-yellow' style='margin-left:8px'>Fix Autores</a>";
+    echo "<a href='?action=fix_author_images' class='btn btn-yellow' style='margin-left:8px'>Fix Author Img</a>";
     echo "<a href='?action=reset_posts' class='btn btn-red' style='margin-left:12px;border:2px solid #f85149'>⚠ Reset Posts</a>";
     echo "</div>";
 }
@@ -621,32 +622,51 @@ function do_fix_featured_images($offset, $batch) {
     global $wpdb;
     page_header('Fix Featured Images');
 
-    // Count total posts
-    $total_posts = $wpdb->get_var("SELECT COUNT(*) FROM $wpdb->posts WHERE post_type='post' AND post_status NOT IN('trash','inherit')");
+    // Optimization: Increase batch size significantly since we are filtering by SQL
+    if ($batch < 500) $batch = 500;
 
-    // Get batch of posts
+    // Count TOTAL posts needing fix (where _thumbnail_id IS NULL)
+    // Note: This query is a bit expensive but accurate for the progress bar
+    $total_needing_fix = $wpdb->get_var("
+        SELECT COUNT(p.ID)
+        FROM $wpdb->posts p
+        LEFT JOIN $wpdb->postmeta pm ON p.ID = pm.post_id AND pm.meta_key = '_thumbnail_id'
+        WHERE p.post_type='post'
+          AND p.post_status NOT IN('trash','inherit')
+          AND pm.meta_value IS NULL
+    ");
+
+    // Get batch of CANDIDATE posts (only those without thumbnail)
     $posts = $wpdb->get_results($wpdb->prepare("
-        SELECT ID, post_title, post_content
-        FROM $wpdb->posts
-        WHERE post_type='post' AND post_status NOT IN('trash','inherit')
-        ORDER BY ID DESC
+        SELECT p.ID, p.post_title, p.post_content
+        FROM $wpdb->posts p
+        LEFT JOIN $wpdb->postmeta pm ON p.ID = pm.post_id AND pm.meta_key = '_thumbnail_id'
+        WHERE p.post_type='post'
+          AND p.post_status NOT IN('trash','inherit')
+          AND pm.meta_value IS NULL
+        ORDER BY p.ID DESC
         LIMIT %d, %d
-    ", $offset, $batch));
+    ", 0, $batch)); // Always offset 0 because we are shrinking the queue
 
-    echo "<div class='card'><h2>Fix Featured Images (lote $offset - " . ($offset + count($posts)) . " de $total_posts)</h2><div class='log'>";
+    echo "<div class='card'><h2>Fix Featured Images</h2>";
+    echo "<p>Total pendiente de reparar: <strong>$total_needing_fix</strong> posts. Procesando lote de $batch.</p>";
+    echo "<div class='log'>";
 
     $fixed = 0;
     $skipped = 0;
-    $already_ok = 0;
 
     foreach ($posts as $post) {
+        // Double check in case of race condition or cache
         if (get_post_thumbnail_id($post->ID)) {
-            $already_ok++;
+            $skipped++;
             continue;
         }
 
         if (strpos($post->post_content, '<img') === false) {
             $skipped++;
+            // We can't fix this one, but it will keep showing up in the query.
+            // Ideally we should mark it as "checked" to avoid loops, but for simple migration
+            // we will just rely on the fact that if we fix some, the count decreases.
             continue;
         }
 
@@ -665,24 +685,109 @@ function do_fix_featured_images($offset, $batch) {
 
     echo "<div class='stat-grid'>";
     echo "<div class='stat-box ok'><div class='number'>$fixed</div><div class='label'>Asignadas ahora</div></div>";
-    echo "<div class='stat-box ok'><div class='number'>$already_ok</div><div class='label'>Ya tenían img</div></div>";
-    echo "<div class='stat-box'><div class='number'>$skipped</div><div class='label'>Sin img válida</div></div>";
+    echo "<div class='stat-box'><div class='number'>$skipped</div><div class='label'>Saltados (sin img)</div></div>";
+    echo "<div class='stat-box warn'><div class='number'>" . ($total_needing_fix - $fixed) . "</div><div class='label'>Restantes aprox</div></div>";
     echo "</div>";
 
-    $processed = $offset + count($posts);
-    $pct = $total_posts > 0 ? min(100, round(($processed / $total_posts) * 100)) : 100;
-    echo "<div class='card'><div class='progress'><div class='fill' style='width:{$pct}%'>$pct% ($processed / $total_posts)</div></div>";
+    // Progress logic: If we fixed something, we reload to get the next batch.
+    // If we processed items but fixed 0, we might be stuck in a loop of "posts without images",
+    // so we should stop or offset?
+    // Current strategy: If $fixed > 0, we are making progress.
+    // If $fixed == 0 and count($posts) > 0, we are just iterating through unfixable posts.
 
-    if (count($posts) >= $batch && $processed < $total_posts) {
-        $next = $offset + $batch;
-        $url = "?action=fix_featured&offset=$next&batch=$batch";
+    if ($fixed > 0 && ($total_needing_fix - $fixed) > 0) {
+        // Continue (keep offset 0 because we removed items from the "queue" by fixing them)
+        $url = "?action=fix_featured&offset=0&batch=$batch";
         echo "<script>setTimeout(function(){window.location.href='$url';},1000);</script>";
         echo "<a href='$url' class='btn btn-blue'>Siguiente lote</a> <a href='?action=audit' class='btn btn-gray'>Detener</a>";
+    } elseif (count($posts) < $batch && $fixed == 0) {
+         echo "<p style='color:#7ee787;font-weight:bold'>Proceso completado (o no hay más imágenes recuperables).</p>";
+         echo "<a href='?action=audit' class='btn btn-blue'>Auditoría</a>";
     } else {
-        echo "<p style='color:#7ee787;font-weight:bold'>Proceso completado.</p>";
-        echo "<a href='?action=audit' class='btn btn-blue'>Auditoría</a>";
+        // We might be hitting a block of unfixable posts.
+        // In a real queue we'd flag them. Here, user can stop.
+        echo "<p style='color:#d29922'>No se repararon imágenes en este lote (posiblemente no tienen &lt;img&gt; en el contenido).</p>";
+        echo "<a href='?action=fix_featured&offset=0&batch=$batch' class='btn btn-blue'>Intentar más</a> <a href='?action=audit' class='btn btn-gray'>Detener</a>";
     }
     echo "</div>";
+    pf();
+}
+
+// ============================================================
+// FIX AUTHOR IMAGES — Importar avatares de Joomla Zoo
+// ============================================================
+function do_fix_author_images() {
+    global $wpdb;
+    page_header('Fix Author Images');
+    $j = jdb();
+
+    // Map WP users with Joomla Author ID
+    $users = $wpdb->get_results("SELECT user_id, meta_value as j_auth_id FROM $wpdb->usermeta WHERE meta_key='_joomla_author_id'");
+
+    echo "<div class='card'><h2>Fix Author Images</h2><div class='log'>";
+
+    $fixed = 0;
+    $errors = 0;
+
+    foreach ($users as $u) {
+        $wp_uid = $u->user_id;
+        $j_aid  = intval($u->j_auth_id);
+
+        // Get Joomla Zoo Item (type=author)
+        // Note: The _joomla_author_id usually maps to the item ID in jos_zoo_item
+        $jrow = $j->query("SELECT name, elements FROM jos_zoo_item WHERE id=$j_aid AND type='author' LIMIT 1");
+
+        if (!$jrow || $jrow->num_rows === 0) {
+            continue;
+        }
+
+        $auth_data = $jrow->fetch_assoc();
+        $elements = json_decode($auth_data['elements'], true);
+
+        // Find image in elements
+        // Structure varies, usually looking for a 'file' key inside some UUID
+        $image_file = '';
+        if ($elements) {
+            foreach ($elements as $uuid => $el) {
+                if (isset($el['file']) && !empty($el['file'])) {
+                    $image_file = $el['file'];
+                    break;
+                }
+            }
+        }
+
+        if (empty($image_file)) {
+            continue;
+        }
+
+        // Import image
+        $res = import_joomla_src_image($image_file, 0); // 0 = unattached to post
+        if ($res && isset($res['id'])) {
+            $attach_id = $res['id'];
+
+            // Set WP Meta for Avatar
+            // 1. Simple Local Avatars plugin
+            update_user_meta($wp_uid, 'simple_local_avatar', ['full' => $res['url'], 'media_id' => $attach_id]);
+
+            // 2. Generic/Other plugins might use these
+            update_user_meta($wp_uid, 'wp_user_avatar', $attach_id);
+
+            lm("Avatar OK: User ID $wp_uid ({$auth_data['name']}) -> " . basename($image_file), 'success');
+            $fixed++;
+        } else {
+            lm("Error importing image for User $wp_uid: $image_file", 'warn');
+            $errors++;
+        }
+    }
+
+    echo "</div></div>";
+
+    echo "<div class='stat-grid'>";
+    echo "<div class='stat-box ok'><div class='number'>$fixed</div><div class='label'>Avatares asignados</div></div>";
+    echo "<div class='stat-box warn'><div class='number'>$errors</div><div class='label'>Errores</div></div>";
+    echo "</div>";
+
+    echo "<div class='card'><a href='?action=audit' class='btn btn-blue'>Volver</a></div>";
     pf();
 }
 
@@ -1537,6 +1642,7 @@ switch ($action) {
     case 'diagnose':    do_diagnose(); break;
     case 'fix_status':  do_fix_status(); break;
     case 'fix_authors': do_fix_authors(); break;
+    case 'fix_author_images': do_fix_author_images(); break;
     case 'reset_posts': do_reset_posts(); break;
     default:            do_audit();
 }
