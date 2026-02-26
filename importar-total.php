@@ -283,6 +283,43 @@ function process_content($elements_json, $post_id = 0) {
 }
 
 // ============================================================
+// JOOMLA ZOO AUTHOR → WP USER
+// ============================================================
+// UUID del elemento "Author" (relateditems) en artículos Zoo
+define('JOOMLA_AUTHOR_UUID', 'fc5a6788-ffae-41d9-a812-3530331fef64');
+
+/**
+ * Build lookup map: zoo_author_item_id → wp_user_id
+ * WP users have _joomla_author_id meta (set by fg-joomla-to-wordpress)
+ */
+function build_author_map() {
+    global $wpdb;
+    $rows = $wpdb->get_results("SELECT user_id, meta_value FROM $wpdb->usermeta WHERE meta_key='_joomla_author_id'");
+    $map = [];
+    foreach ($rows as $r) {
+        $map[intval($r->meta_value)] = intval($r->user_id);
+    }
+    return $map;
+}
+
+/**
+ * Extract Zoo author item ID from article elements JSON.
+ * Format: {"fc5a6788-...": {"item": ["11"]}}
+ * Returns int ID or null if not found.
+ */
+function get_zoo_author_id_from_elements($elements_json) {
+    $els = json_decode($elements_json, true);
+    if (!$els) return null;
+    $data = $els[JOOMLA_AUTHOR_UUID] ?? null;
+    if (!$data) return null;
+    if (isset($data['item']) && is_array($data['item']) && !empty($data['item'])) {
+        $id = intval($data['item'][0]);
+        return $id > 0 ? $id : null;
+    }
+    return null;
+}
+
+// ============================================================
 // JOOMLA STATE → WP STATUS
 // ============================================================
 function joomla_to_wp_status($state) {
@@ -365,6 +402,7 @@ function page_header($title) {
     echo "<a href='?action=verify' class='btn btn-gray'>Verificar 1:1</a>";
     echo "<a href='?action=diagnose' class='btn btn-red'>Diagnóstico</a>";
     echo "<a href='?action=fix_status' class='btn btn-yellow'>Fix Estado</a>";
+    echo "<a href='?action=fix_authors' class='btn btn-yellow' style='margin-left:8px'>Fix Autores</a>";
     echo "<a href='?action=reset_posts' class='btn btn-red' style='margin-left:12px;border:2px solid #f85149'>⚠ Reset Posts</a>";
     echo "</div>";
 }
@@ -607,6 +645,9 @@ function do_sync($offset, $batch) {
         }
     }
 
+    // Build author map once: zoo_author_item_id → wp_user_id
+    $author_map = build_author_map();
+
     // Get ALL Joomla articles+pages (any state, excluding authors)
     $all_items = [];
     $jr = $j->query("SELECT * FROM jos_zoo_item WHERE type IN('article','page') ORDER BY id ASC");
@@ -706,6 +747,17 @@ function do_sync($offset, $batch) {
                 $actions[] = 'STS→' . ($wp_status === 'publish' ? 'PUB' : ($wp_status === 'future' ? 'FUT' : ($wp_status === 'draft' ? 'DFT' : strtoupper($wp_status))));
             }
 
+            // AUTHOR SYNC — update post_author if Zoo element found and differs
+            $zoo_auth_id = get_zoo_author_id_from_elements($row['elements']);
+            if ($zoo_auth_id && isset($author_map[$zoo_auth_id])) {
+                $correct_author = $author_map[$zoo_auth_id];
+                if (intval($wp_post->post_author) !== $correct_author) {
+                    $update_data['post_author'] = $correct_author;
+                    $needs_update = true;
+                    $actions[] = 'AUTH';
+                }
+            }
+
             if ($needs_update) {
                 $update_data['post_content'] = $wp_content;
                 $wpdb->update($wpdb->posts, $update_data, ['ID' => $exists_wp]);
@@ -727,11 +779,9 @@ function do_sync($offset, $batch) {
 
         } else {
             // NEW POST — create
-            $wp_author = 1;
-            if ($row['created_by'] > 0) {
-                $u = $wpdb->get_var($wpdb->prepare("SELECT user_id FROM $wpdb->usermeta WHERE meta_key='_joomla_user_id' AND meta_value=%s LIMIT 1", $row['created_by']));
-                if ($u) $wp_author = $u;
-            }
+            // Author via Zoo "Author" relateditems element → _joomla_author_id meta
+            $zoo_auth_id = get_zoo_author_id_from_elements($row['elements']);
+            $wp_author = ($zoo_auth_id && isset($author_map[$zoo_auth_id])) ? $author_map[$zoo_auth_id] : 1;
 
             $wp_id = wp_insert_post([
                 'post_title'        => $row['name'],
@@ -1340,15 +1390,80 @@ function do_reset_posts() {
 }
 
 // ============================================================
+// FIX AUTHORS — Actualiza post_author en todos los posts importados
+// ============================================================
+function do_fix_authors() {
+    global $wpdb;
+    ph();
+    page_header('Fix Autores');
+
+    $author_map = build_author_map();
+    $total_map  = count($author_map);
+
+    echo "<div class='card'>";
+    echo "<p style='color:#8b949e'>Mapa cargado: <strong>$total_map autores</strong> Zoo → WP.<br>";
+    echo "Actualizando <code>post_author</code> en posts importados según el elemento Author de Joomla Zoo…</p>";
+    echo "<div class='log'>";
+
+    $j = jdb();
+    $imported = $wpdb->get_results("
+        SELECT p.ID, p.post_author, p.post_title, pm.meta_value as zoo_id
+        FROM $wpdb->posts p
+        JOIN $wpdb->postmeta pm ON p.ID = pm.post_id AND pm.meta_key = '_joomla_zoo_id'
+        WHERE p.post_type = 'post' AND p.post_status NOT IN('trash','inherit')
+        ORDER BY p.ID ASC
+    ");
+
+    $fixed = 0; $ok = 0; $no_author = 0; $errors = 0;
+
+    foreach ($imported as $wp_p) {
+        $zoo_id = intval($wp_p->zoo_id);
+        $jrow   = $j->query("SELECT elements FROM jos_zoo_item WHERE id=$zoo_id LIMIT 1");
+        $jdata  = $jrow ? $jrow->fetch_assoc() : null;
+
+        if (!$jdata) { $errors++; continue; }
+
+        $zoo_auth_id = get_zoo_author_id_from_elements($jdata['elements']);
+        if (!$zoo_auth_id || !isset($author_map[$zoo_auth_id])) {
+            $no_author++;
+            continue;
+        }
+
+        $correct = $author_map[$zoo_auth_id];
+        if (intval($wp_p->post_author) === $correct) {
+            $ok++;
+            continue;
+        }
+
+        $wpdb->update($wpdb->posts, ['post_author' => $correct], ['ID' => $wp_p->ID]);
+        clean_post_cache($wp_p->ID);
+        lm("FIXED WP:{$wp_p->ID} author:{$wp_p->post_author}→{$correct} Zoo:{$zoo_id} | " . htmlspecialchars(mb_substr($wp_p->post_title, 0, 55)), 'success');
+        $fixed++;
+        @ob_flush(); @flush();
+    }
+
+    echo "</div></div>";
+
+    echo "<div class='stat-grid'>";
+    echo "<div class='stat-box ok'><div class='number'>$fixed</div><div class='label'>Autores corregidos</div></div>";
+    echo "<div class='stat-box ok'><div class='number'>$ok</div><div class='label'>Ya correctos</div></div>";
+    echo "<div class='stat-box" . ($no_author > 0 ? '' : ' ok') . "'><div class='number'>$no_author</div><div class='label'>Sin autor en Zoo</div></div>";
+    echo "<div class='stat-box" . ($errors > 0 ? ' warn' : ' ok') . "'><div class='number'>$errors</div><div class='label'>No en Joomla</div></div>";
+    echo "</div>";
+    pf();
+}
+
+// ============================================================
 // ROUTER
 // ============================================================
 switch ($action) {
-    case 'audit':      do_audit(); break;
-    case 'sync':       do_sync($offset, $batch); break;
-    case 'fix_base64': do_fix_base64($offset, $batch); break;
-    case 'verify':     do_verify(); break;
+    case 'audit':       do_audit(); break;
+    case 'sync':        do_sync($offset, $batch); break;
+    case 'fix_base64':  do_fix_base64($offset, $batch); break;
+    case 'verify':      do_verify(); break;
     case 'diagnose':    do_diagnose(); break;
     case 'fix_status':  do_fix_status(); break;
+    case 'fix_authors': do_fix_authors(); break;
     case 'reset_posts': do_reset_posts(); break;
     default:            do_audit();
 }
