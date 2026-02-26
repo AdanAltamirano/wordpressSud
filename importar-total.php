@@ -296,6 +296,19 @@ function joomla_to_wp_status($state) {
     }
 }
 
+/**
+ * Joomla state + fecha → WP status correcto.
+ * Si state=1 (publicado) pero la fecha es futura → 'future' (programado en WP).
+ * WP publicará el post automáticamente cuando llegue esa fecha.
+ */
+function joomla_to_wp_status_with_date($state, $created) {
+    $base = joomla_to_wp_status($state);
+    if ($base === 'publish' && strtotime($created) > time()) {
+        return 'future'; // WP schedules it; auto-publishes on that date
+    }
+    return $base;
+}
+
 // ============================================================
 // HTML UI
 // ============================================================
@@ -617,20 +630,8 @@ function do_sync($offset, $batch) {
         $b64_total += $result['b64_fixed'];
         $img_total += $result['img_fixed'];
 
-        $wp_status = joomla_to_wp_status($row['state']);
-
-        // Save original Joomla dates BEFORE clamping (used in DATE-FIX comparison below)
-        $joomla_original_created  = $row['created'];
-        $joomla_original_modified = $row['modified'];
-
-        // FIX DATES (clamp future dates to now so posts don't get 'scheduled')
-        if (strtotime($row['created']) > time()) {
-            $row['created'] = current_time('mysql');
-            if ($row['created_by'] == $row['modified_by']) $row['modified'] = $row['created'];
-        }
-        if (strtotime($row['modified']) > time()) {
-            $row['modified'] = current_time('mysql');
-        }
+        // WP status takes date into account: state=1 + future date → 'future' (scheduled in WP)
+        $wp_status = joomla_to_wp_status_with_date($row['state'], $row['created']);
 
         // Cell tags
         $cell_tags = '';
@@ -646,23 +647,16 @@ function do_sync($offset, $batch) {
             $update_data = [];
             $actions = [];
 
-            // DATE FIX — only when WP is still 'scheduled' (future date), or when the
-            // Joomla date is a PAST date that genuinely changed vs what's stored in WP.
-            // If Joomla date is still in the future but WP already has a corrected past
-            // date, we leave it alone (avoids re-stamping the post date on every sync).
+            // DATE SYNC — update WP date if Joomla date changed
             $wp_date_ts     = strtotime($wp_post->post_date);
-            $joomla_orig_ts = strtotime($joomla_original_created);
-            $needs_date_fix = ($wp_date_ts > time()) // WP post is still 'future'/scheduled
-                           || ($joomla_orig_ts <= time() && abs($wp_date_ts - $joomla_orig_ts) > 60); // past-date changed in Joomla
-            if ($needs_date_fix) {
+            $joomla_date_ts = strtotime($row['created']);
+            if (abs($wp_date_ts - $joomla_date_ts) > 60) {
                 $update_data['post_date']         = $row['created'];
                 $update_data['post_date_gmt']     = get_gmt_from_date($row['created']);
                 $update_data['post_modified']     = $row['modified'];
                 $update_data['post_modified_gmt'] = get_gmt_from_date($row['modified']);
-                // Ensure published if date is valid
-                if ($wp_status === 'publish') {
-                    $update_data['post_status'] = 'publish';
-                }
+                // Status must also reflect the new date
+                $update_data['post_status'] = $wp_status;
                 $needs_update = true;
                 $actions[] = 'DATE-FIX';
             }
@@ -699,11 +693,17 @@ function do_sync($offset, $batch) {
                 }
             }
 
-            // STATUS SYNC — always reflect Joomla state in WP post_status
-            if ($wp_post->post_status !== $wp_status) {
+            // STATUS SYNC — reflect Joomla state in WP.
+            // 'future' and 'publish' are both valid for Joomla state=1: if WP already
+            // has 'future' (correctly scheduled) and Joomla wants 'publish', leave it —
+            // WP will auto-publish it on the scheduled date.
+            $current_wp_status = $wp_post->post_status;
+            $status_ok = ($current_wp_status === $wp_status)
+                      || ($wp_status === 'publish' && $current_wp_status === 'future');
+            if (!$status_ok) {
                 $update_data['post_status'] = $wp_status;
                 $needs_update = true;
-                $actions[] = 'STS→' . ($wp_status === 'publish' ? 'PUB' : ($wp_status === 'draft' ? 'DFT' : strtoupper($wp_status)));
+                $actions[] = 'STS→' . ($wp_status === 'publish' ? 'PUB' : ($wp_status === 'future' ? 'FUT' : ($wp_status === 'draft' ? 'DFT' : strtoupper($wp_status))));
             }
 
             if ($needs_update) {
@@ -737,7 +737,7 @@ function do_sync($offset, $batch) {
                 'post_title'        => $row['name'],
                 'post_name'         => $row['alias'],
                 'post_content'      => $content,
-                'post_status'       => $wp_status,
+                'post_status'       => $wp_status, // 'future' if state=1 + future date
                 'post_date'         => $row['created'],
                 'post_date_gmt'     => get_gmt_from_date($row['created']),
                 'post_modified'     => $row['modified'],
@@ -772,8 +772,8 @@ function do_sync($offset, $batch) {
             if ($tq) { while ($tr = $tq->fetch_assoc()) $tags_arr[] = $tr['name']; }
             if (!empty($tags_arr)) wp_set_post_tags($wp_id, $tags_arr, true);
 
-            $state_label = strtoupper($wp_status);
-            $st_class = $wp_status === 'publish' ? 'tag-pub' : 'tag-draft';
+            $state_label = $wp_status === 'future' ? 'PROG' : strtoupper($wp_status);
+            $st_class = $wp_status === 'publish' ? 'tag-pub' : ($wp_status === 'future' ? 'tag-b64' : 'tag-draft');
             // Grid cell — CREADO
             echo "<div class='article-cell status-new'>";
             echo "<div class='cell-id'>WP:{$wp_id} ← Zoo:{$zoo_id}</div>";
